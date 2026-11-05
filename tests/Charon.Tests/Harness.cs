@@ -74,6 +74,8 @@ public sealed class Harness : IAsyncLifetime
             PUT: ^https?://localhost:[0-9]+/allowed/put
             GET: ^https://localhost:{UntrustedHttpsPort}/
             GET: ^https://127\.0\.0\.1:{RawPort}/
+            GET-BODY: ^https://localhost:[0-9]+/allowed/body-ok
+            WEBSOCKET: ^https://localhost:[0-9]+/allowed/ws$
             GET: ^http://localhost:{UiPort}/
             """);
 
@@ -212,6 +214,9 @@ public sealed class Harness : IAsyncLifetime
         DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
         Timeout = TimeSpan.FromSeconds(30),
     };
+
+    /// <summary>For WebSockets over HTTP/2, which needs the handler passed in.</summary>
+    public HttpMessageInvoker MakeInvoker() => new(MakeHandler());
 
     public ClientWebSocket MakeWebSocket()
     {

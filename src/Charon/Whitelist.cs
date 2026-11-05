@@ -18,6 +18,11 @@ namespace Charon;
 /// only a handful of them need to run for any URL.  Rules for which that cannot be
 /// determined go in a list that is always scanned.  Mistakes in the bucketing can
 /// only ever deny a URL, never allow one, since a rule's regex must still match.
+/// </para>
+/// <para>
+/// Beyond the add-in's format, there are the rule types <c>GET-BODY</c> and
+/// <c>WEBSOCKET</c>, for what a <c>GET</c> rule no longer grants: see <see cref="Capability"/>.
+/// </para>
 /// </remarks>
 internal sealed class Whitelist : IDisposable
 {
@@ -26,14 +31,10 @@ internal sealed class Whitelist : IDisposable
 
     private const RegexOptions PatternOptions = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
 
-    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
-
     /// <summary>Matches the prefix of a rule that gives its host name literally.</summary>
     private static readonly Regex LiteralHostRule = new(
         @"^\^https\??://(?:\((?:\?:)?\[-a-z0-9\.\]\+\\\.\)\?)?(?<host>(?:[-a-z0-9_]|\\\.)+)(?:[/:$]|\\/|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-    private enum MethodClass { Get, Post, Put, Count }
 
     private sealed class RuleSet
     {
@@ -41,49 +42,42 @@ internal sealed class Whitelist : IDisposable
         public readonly List<Regex> Unindexed = new();
     }
 
-    private readonly string _path;
     private readonly ILogger? _logger;
-    private readonly CancellationTokenSource _disposed = new();
+    private readonly PolledFile _file;
 
     private volatile RuleSet[] _rules = NewRuleSets();
-    private DateTime _lastWriteTime;
 
+    /// <summary>Loads a file, and follows changes to it.  If it is gone then nothing is allowed.</summary>
     public Whitelist(string path, ILogger? logger = null)
     {
-        _path = path;
         _logger = logger;
-        Reload();
-        _ = PollAsync();
+        _file = new PolledFile(path, Load, () => _rules = NewRuleSets(), logger);
     }
 
-    public void Dispose() => _disposed.Cancel();
+    public void Dispose() => _file.Dispose();
+
+    private void Load(string path)
+    {
+        _rules = Parse(File.ReadAllLines(path), out int count, out int unindexed);
+        _logger?.LogInformation("Loaded {Count} rules from {Path}, of which {Unindexed} are not indexed by host",
+                                count, path, unindexed);
+    }
 
     private static RuleSet[] NewRuleSets()
     {
-        var sets = new RuleSet[(int)MethodClass.Count];
+        var sets = new RuleSet[(int)Capability.Count];
         for (int i = 0; i < sets.Length; i++)
             sets[i] = new RuleSet();
         return sets;
     }
 
-    private static MethodClass? Classify(string method) => method.ToUpperInvariant() switch
-    {
-        "GET" or "HEAD" or "OPTIONS" => MethodClass.Get,
-        "POST" => MethodClass.Post,
-        "PUT" or "PATCH" or "DELETE" => MethodClass.Put,
-        _ => null,
-    };
-
     /// <summary>Decides on a request.</summary>
-    /// <param name="method">HTTP method.</param>
+    /// <param name="capability">What the request needs.</param>
     /// <param name="url">The URL exactly as it will be requested upstream.</param>
     /// <param name="host">Host of the URL, in lower case.</param>
-    public bool IsAllowed(string method, string url, string host)
+    public bool IsAllowed(Capability capability, string url, string host)
     {
-        if (Classify(method) is not { } methodClass)
-            return false;
-
-        var rules = _rules[(int)methodClass];
+        var rules = _rules[(int)capability];
 
         try
         {
@@ -116,48 +110,6 @@ internal sealed class Whitelist : IDisposable
         return false;
     }
 
-    private async Task PollAsync()
-    {
-        using var timer = new PeriodicTimer(PollInterval);
-        try
-        {
-            while (await timer.WaitForNextTickAsync(_disposed.Token))
-                Reload();
-        }
-        catch (OperationCanceledException)
-        {
-        }
-    }
-
-    /// <summary>
-    /// Loads the file if it changed.  If it cannot be parsed the rules in force stay,
-    /// but if it is gone then nothing is allowed.
-    /// </summary>
-    private void Reload()
-    {
-        try
-        {
-            var lastWriteTime = File.GetLastWriteTimeUtc(_path);
-            if (lastWriteTime == _lastWriteTime)
-                return;
-
-            var lines = File.ReadAllLines(_path);
-            _lastWriteTime = lastWriteTime;
-            _rules = Parse(lines, out int count, out int unindexed);
-            _logger?.LogInformation("Loaded {Count} rules from {Path}, of which {Unindexed} are not indexed by host",
-                                    count, _path, unindexed);
-        }
-        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException)
-        {
-            _lastWriteTime = default;
-            _rules = NewRuleSets();
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or FormatException)
-        {
-            _logger?.LogError(e, "Could not load {Path}", _path);
-        }
-    }
-
     private static RuleSet[] Parse(string[] lines, out int count, out int unindexed)
     {
         var sets = NewRuleSets();
@@ -172,10 +124,12 @@ internal sealed class Whitelist : IDisposable
             int colon = line.IndexOf(':');
             var methods = colon < 0 ? null : line[..colon] switch
             {
-                "GET" => new[] { MethodClass.Get },
-                "POST" => [MethodClass.Post],
-                "PUT" => [MethodClass.Put],
-                "ANY" => [MethodClass.Get, MethodClass.Post, MethodClass.Put],
+                "GET" => new[] { Capability.Get },
+                "POST" => [Capability.Post],
+                "PUT" => [Capability.Put],
+                "ANY" => [Capability.Get, Capability.Post, Capability.Put],
+                "GET-BODY" => [Capability.GetWithBody],
+                "WEBSOCKET" => [Capability.WebSocket],
                 _ => null,
             };
             var pattern = line[(colon + 1)..].Trim();

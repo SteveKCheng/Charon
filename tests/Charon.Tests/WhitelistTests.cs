@@ -17,7 +17,7 @@ public sealed class WhitelistTests : IDisposable
     }
 
     private static bool Allowed(Whitelist list, string method, string url) =>
-        list.IsAllowed(method, url, new Uri(url).IdnHost);
+        RequestPolicy.ForMethod(method) is { } capability && list.IsAllowed(capability, url, new Uri(url).IdnHost);
 
     [Theory]
     [InlineData(@"^https://example\.com/", "example.com")]
@@ -59,6 +59,25 @@ public sealed class WhitelistTests : IDisposable
         Assert.False(Allowed(list, "GET", "https://notgithub.com/"));
         Assert.False(Allowed(list, "GET", "https://github.com.evil.example/"));
         Assert.False(Allowed(list, "PUT", "https://example.com/x"));
+    }
+
+    [Fact]
+    public void OptInRuleTypesAreSeparateFromGetAndAny()
+    {
+        using var list = Load(
+            @"ANY: ^https://a\.test/",
+            @"GET-BODY: ^https://b\.test/",
+            @"WEBSOCKET: ^https://c\.test/");
+
+        Assert.True(list.IsAllowed(Capability.Get, "https://a.test/", "a.test"));
+        Assert.False(list.IsAllowed(Capability.GetWithBody, "https://a.test/", "a.test"));
+        Assert.False(list.IsAllowed(Capability.WebSocket, "https://a.test/", "a.test"));
+
+        Assert.True(list.IsAllowed(Capability.GetWithBody, "https://b.test/", "b.test"));
+        Assert.False(list.IsAllowed(Capability.Get, "https://b.test/", "b.test"));
+
+        Assert.True(list.IsAllowed(Capability.WebSocket, "https://c.test/", "c.test"));
+        Assert.False(list.IsAllowed(Capability.Get, "https://c.test/", "c.test"));
     }
 
     [Fact]

@@ -63,11 +63,9 @@ internal sealed class ForwardProxy
         var request = context.Request;
         var client = context.Connection.RemoteIpAddress + ":" + context.Connection.RemotePort;
 
-        // WebSockets over HTTP/2 use CONNECT, where over HTTP/1.1 they use GET.
-        var isExtendedConnect = context.Features.Get<IHttpExtendedConnectFeature>()?.IsExtendedConnect == true;
-        var method = isExtendedConnect ? HttpMethods.Get : request.Method;
+        var capability = RequestPolicy.GetRequiredCapability(context);
 
-        if (HttpMethods.IsConnect(method))
+        if (HttpMethods.IsConnect(request.Method) && capability is null)
         {
             // Only the first request of a connection can be CONNECT: see ProxyListener.
             context.Response.Headers.Connection = "close";
@@ -88,10 +86,19 @@ internal sealed class ForwardProxy
 
         var url = destination.AbsoluteUri;
 
-        if (!_whitelist.IsAllowed(method, url, destination.IdnHost.ToLowerInvariant()))
+        if (RequestPolicy.FindViolation(request, destination) is { } violation)
         {
             await RefuseAsync(context, client, StatusCodes.Status403Forbidden, request.Method, url,
-                              $"Access Denied: '{url}' (method {request.Method}) is disallowed by the sandbox's whitelist.");
+                              $"Access Denied: {violation}", note: violation);
+            return;
+        }
+
+        if (capability is not { } required ||
+            !_whitelist.IsAllowed(required, url, destination.IdnHost.ToLowerInvariant()))
+        {
+            await RefuseAsync(context, client, StatusCodes.Status403Forbidden, request.Method, url,
+                              $"Access Denied: '{url}' (method {request.Method}{Describe(capability)}) " +
+                              "is disallowed by the sandbox's whitelist.");
             return;
         }
 
@@ -109,10 +116,19 @@ internal sealed class ForwardProxy
         });
     }
 
-    private Task RefuseAsync(HttpContext context, string client, int status,
-                             string method, string url, string message)
+    /// <summary>Tells why a request can be refused though its method and URL look allowed.</summary>
+    private static string Describe(Capability? capability) => capability switch
     {
-        _log.Add(client, method, url, allowed: false, status: status);
+        Capability.GetWithBody => ", with a body",
+        Capability.WebSocket => ", as a WebSocket",
+        null => ", or its protocol upgrade",
+        _ => "",
+    };
+
+    private Task RefuseAsync(HttpContext context, string client, int status,
+                             string method, string url, string message, string? note = null)
+    {
+        _log.Add(client, method, url, allowed: false, status: status, note: note);
         context.Response.StatusCode = status;
         context.Response.ContentType = "text/plain";
         return context.Response.WriteAsync(message + "\n");

@@ -163,20 +163,6 @@ public sealed class EnforcementTests(Harness h)
     }
 
     [Fact]
-    public async Task EncodedSlashesAreForwardedVerbatim()
-    {
-        // A known limit: this is one segment to the proxy, so it passes a rule for /allowed.
-        // A server that decodes %2F before routing would see something else.  Rules cannot
-        // currently guard against that, so this documents the behaviour rather than endorses it.
-        var path = $"/allowed/x%2F..%2F..%2Fsecret-{Guid.NewGuid()}";
-        await using var tls = await h.OpenTunnelAsync($"localhost:{h.HttpsPort}", "localhost");
-        await Harness.ExchangeAsync(tls,
-            $"GET {path} HTTP/1.1\r\nHost: localhost:{h.HttpsPort}\r\nConnection: close\r\n\r\n");
-
-        Assert.True(h.UpstreamSaw(path));
-    }
-
-    [Fact]
     public async Task RawTcpInTunnelGoesNowhere()
     {
         // The target is whitelisted for HTTPS, so that only protocol enforcement can stop this.

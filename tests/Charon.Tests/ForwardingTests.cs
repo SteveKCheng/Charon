@@ -79,6 +79,20 @@ public sealed class ForwardingTests(Harness h)
     }
 
     [Fact]
+    public async Task WebSocketOverHttp2()
+    {
+        using var socket = new ClientWebSocket();
+        socket.Options.HttpVersion = HttpVersion.Version20;
+        socket.Options.HttpVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+        using var invoker = h.MakeInvoker();
+        await socket.ConnectAsync(new Uri($"wss://localhost:{h.HttpsPort}/allowed/ws"), invoker, default);
+        await socket.SendAsync("hello"u8.ToArray(), WebSocketMessageType.Text, true, default);
+        var buffer = new byte[64];
+        var received = await socket.ReceiveAsync(buffer, default);
+        Assert.Equal("hello", Encoding.UTF8.GetString(buffer, 0, received.Count));
+    }
+
+    [Fact]
     public async Task UploadOverKestrelsDefaultLimit()
     {
         const long size = 40L * 1024 * 1024;

@@ -40,16 +40,41 @@ POST: ^https://github\.com/[^/]+/[^/]+(\.git)?/git-upload-pack$
 
 `GET` also covers `HEAD` and `OPTIONS`, `PUT` covers `PATCH` and `DELETE`, and `ANY` is all of these.
 
+Two more types of rule are for what those deliberately do not grant, and `ANY` does not include them:
+
+```
+# GET, HEAD or OPTIONS requests that have a body, as used by Elasticsearch
+GET-BODY: ^https://search\.example\.com/_search
+# WebSockets: matched against the https:// or http:// form of the URL
+WEBSOCKET: ^https://stream\.example\.com/events$
+```
+
 Patterns are .NET regular expressions, not PCRE.  Rules starting like the above are indexed
 by host name, so that the cost of matching does not grow with the length of the whitelist.
 The log says how many rules could not be indexed: these get run against every request.
 Write `\.` and not `.` in host names so that rules can be indexed.
+
+## Requests that are always refused
+
+Whitelisting a URL means trusting its server to be well-behaved, but not to be free of
+loopholes.  As defense in depth, these are refused no matter what the rules say:
+
+  - Headers and query parameters that override the method, such as
+    `X-HTTP-Method-Override` and `_method`, or the URL, such as `X-Original-URL`.
+  - Headers that claim to be from a proxy trusted by the server, such as
+    `X-Forwarded-For`, `X-Forwarded-Host`, and `Forwarded`.
+  - Paths that have `..` segments once decoded, such as `/a%2F..%2Fb` or `/a/..;/b`.
+    Encoded slashes by themselves are fine: they are normal for npm and GitLab.
+  - Protocol upgrades to anything other than WebSockets.
+
+Request bodies are not inspected, so this does not catch `_method` in a submitted form.
 
 ## Differences from mitmproxy-whitelist
 
   - URLs are built from where the request actually goes, not the `Host` header.
     A `Host` header that disagrees with the destination gets the request refused.
   - Tunnels only carry HTTP in TLS.  Anything else, such as SSH over `CONNECT`, is dropped.
+  - `GET` rules do not grant bodies or WebSockets, and some requests are always refused, as above.
 
 ## Testing
 
