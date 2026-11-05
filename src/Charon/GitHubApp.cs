@@ -31,6 +31,13 @@ internal sealed record GitHubAppConfig
     public string[]? Repositories { get; init; }
 }
 
+[JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(GitHubAppTokenSource.TokenRequest))]
+[JsonSerializable(typeof(GitHubAppTokenSource.TokenResponse))]
+internal partial class GitHubAppJsonContext : JsonSerializerContext
+{
+}
+
 /// <summary>
 /// Gets installation access tokens, which expire after an hour, from a GitHub App.
 /// The App's private key is only used here.  Unlike the requests that the
@@ -51,14 +58,14 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    private sealed record TokenRequest(
+    internal sealed record TokenRequest(
         [property: JsonPropertyName("permissions")] Dictionary<string, string>? Permissions,
         [property: JsonPropertyName("repositories")] string[]? Repositories);
 
-    private sealed record TokenResponse(
+    internal sealed record TokenResponse(
         [property: JsonPropertyName("token")] string Token,
         [property: JsonPropertyName("expires_at")] DateTimeOffset ExpiresAt);
-
+    
     private readonly SemaphoreSlim _lock = new(1);
 
     private volatile TokenResponse? _current;
@@ -121,13 +128,13 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
         request.Headers.TryAddWithoutValidation("User-Agent", "Charon");
         request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
         request.Content = JsonContent.Create(new TokenRequest(config.Permissions, config.Repositories),
-                                             options: RequestOptions);
+                                             jsonTypeInfo: GitHubAppJsonContext.Default.TokenRequest);            
 
         using var response = await client.SendAsync(request, timeout.Token);
         if (!response.IsSuccessStatusCode)
             throw new CredentialUnavailableException($"GitHub refused to issue a token: status {(int)response.StatusCode}.");
 
-        return await response.Content.ReadFromJsonAsync<TokenResponse>(timeout.Token)
+        return await response.Content.ReadFromJsonAsync(GitHubAppJsonContext.Default.TokenResponse, timeout.Token)
             ?? throw new CredentialUnavailableException("GitHub's response had no token.");
     }
 
@@ -148,16 +155,35 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
         using var key = RSA.Create();
         key.ImportFromPem(pem);
 
+        using var jsonStream = new MemoryStream(capacity: 96);
+        using var jsonWriter = new Utf8JsonWriter(jsonStream);
+
+        jsonWriter.WriteStartObject();
+        jsonWriter.WriteString("alg", "RS256");
+        jsonWriter.WriteString("typ", "JWT");
+        jsonWriter.WriteEndObject();
+        jsonWriter.Flush();
+        var headerBase64 = Base64Url.EncodeToString(jsonStream.GetBuffer()[0..(int)jsonStream.Length]);
+
+        jsonWriter.Reset();
+        jsonStream.SetLength(0);
+            
         // Backdated in case of clock drift.  GitHub allows at most 10 minutes of validity.
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var header = """{"alg":"RS256","typ":"JWT"}""";
-        var payload = JsonSerializer.Serialize(new { iat = now - 60, exp = now + 540, iss = config.AppId });
-
-        var signedPart = Base64Url.EncodeToString(Encoding.UTF8.GetBytes(header)) + "." +
-                         Base64Url.EncodeToString(Encoding.UTF8.GetBytes(payload));
+        
+        jsonWriter.WriteStartObject();
+        jsonWriter.WriteNumber("iat", now - 60);
+        jsonWriter.WriteNumber("exp", now + 540);
+        jsonWriter.WriteString("iss", config.AppId);
+        jsonWriter.WriteEndObject();
+        jsonWriter.Flush();
+        var payloadBase64 = Base64Url.EncodeToString(jsonStream.GetBuffer()[0..(int)jsonStream.Length]); 
+        
+        var signedPart = headerBase64 + "." + payloadBase64; 
         var signature = key.SignData(Encoding.ASCII.GetBytes(signedPart),
                                      HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
         return signedPart + "." + Base64Url.EncodeToString(signature);
     }
+
 }
