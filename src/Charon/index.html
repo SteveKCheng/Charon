@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charon</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --denied: #c62828; --ok: #2e7d32; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; }
+  header { position: sticky; top: 0; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 8px 16px; background: Canvas; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 16px; margin: 0; }
+  #filter { flex: 1; min-width: 160px; padding: 4px 8px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td { padding: 3px 8px; border-bottom: 1px solid var(--line); text-align: left;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  td.url { font-family: ui-monospace, monospace; font-size: 13px; }
+  th:nth-child(1) { width: 6em; } th:nth-child(2) { width: 5em; } th:nth-child(3) { width: 3.5em; }
+  th:nth-child(5) { width: 5em; } th:nth-child(6) { width: 11em; }
+  tr.denied td { color: var(--denied); }
+  tr.pending td:nth-child(3)::after { content: "…"; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Charon</h1>
+  <input id="filter" type="search" placeholder="Filter URLs" aria-label="Filter URLs">
+  <label><input id="deniedOnly" type="checkbox"> Denied only</label>
+  <span id="status">Connecting…</span>
+</header>
+<table>
+  <thead><tr><th>Time</th><th>Method</th><th>Status</th><th>URL</th><th>ms</th><th>Client</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+// Everything here goes in through textContent: URLs are chosen by the sandboxed
+// clients, and must not get to run script in the page of whoever is watching them.
+const maxRows = 2000;
+const rows = document.getElementById("rows");
+const filter = document.getElementById("filter");
+const deniedOnly = document.getElementById("deniedOnly");
+const status = document.getElementById("status");
+const byId = new Map();
+
+function matches(e) {
+  return (!deniedOnly.checked || !e.allowed) && e.url.toLowerCase().includes(filter.value.toLowerCase());
+}
+
+function render(tr, e) {
+  const cells = [new Date(e.time).toLocaleTimeString(), e.method, e.status ?? "", e.url,
+                 e.durationMs == null ? "" : Math.round(e.durationMs), e.client];
+  tr.replaceChildren(...cells.map((text, i) => {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (i === 3) { td.className = "url"; td.title = (e.note ? e.note + ": " : "") + e.url; }
+    return td;
+  }));
+  tr.className = !e.allowed ? "denied" : e.status == null ? "pending" : "";
+  tr.hidden = !matches(e);
+  tr.entry = e;
+}
+
+function onEntry(e) {
+  let tr = byId.get(e.id);
+  if (!tr) {
+    tr = document.createElement("tr");
+    byId.set(e.id, tr);
+    rows.prepend(tr);
+    if (rows.children.length > maxRows) {
+      byId.delete(rows.lastElementChild.entry.id);
+      rows.lastElementChild.remove();
+    }
+  }
+  render(tr, e);
+}
+
+function refilter() {
+  for (const tr of rows.children) tr.hidden = !matches(tr.entry);
+}
+
+filter.addEventListener("input", refilter);
+deniedOnly.addEventListener("change", refilter);
+
+const events = new EventSource("/api/traffic");
+events.onopen = () => { status.textContent = "Live"; };
+events.onerror = () => { status.textContent = "Disconnected: retrying…"; };
+events.onmessage = m => onEntry(JSON.parse(m.data));
+</script>
+</body>
+</html>
