@@ -69,6 +69,59 @@ loopholes.  As defense in depth, these are refused no matter what the rules say:
 
 Request bodies are not inspected, so this does not catch `_method` in a submitted form.
 
+## Credentials
+
+Charon can add secrets to requests, so that agents can use APIs without being able to read
+any secret.  They are listed in `~/.config/charon/credentials.json`, which is reloaded
+when it changes:
+
+```jsonc
+[
+  // A token in a file.  Replaces any Authorization header from the client.
+  {
+    "name": "anthropic",
+    "origin": "https://api.anthropic.com",
+    "url": "^https://api\\.anthropic\\.com/v1/messages",
+    "header": "x-api-key",
+    "scheme": "",
+    "tokenFile": "/home/me/.secrets/anthropic-key"
+  },
+  // Short-lived tokens from a GitHub App, for the REST API.
+  {
+    "name": "github-ci",
+    "origin": "https://api.github.com",
+    "url": "^https://api\\.github\\.com/repos/me/project/actions/",
+    "gitHubApp": {
+      "appId": "123456",
+      "installationId": 7890123,
+      "privateKeyFile": "/home/me/.secrets/charon-app.pem",
+      "permissions": { "actions": "write" },   // Optional: narrower than the App's.
+      "repositories": [ "project" ]            // Optional
+    }
+  },
+  // The same for git over HTTPS, which uses Basic authentication.
+  {
+    "name": "github-git",
+    "origin": "https://github.com",
+    "url": "^https://github\\.com/me/project(\\.git)?/",
+    "basicUser": "x-access-token",
+    "gitHubApp": { "appId": "123456", "installationId": 7890123, "privateKeyFile": "/home/me/.secrets/charon-app.pem" }
+  }
+]
+```
+
+  - The first entry that matches is used.  `url` is a regular expression, but only applies at
+    exactly the `origin`, which must be `https`.  So a loose pattern cannot send a secret elsewhere.
+  - Credentials grant no access: requests must still be allowed by the whitelist.
+  - If a token cannot be obtained, the request fails with status 502 and is not forwarded.
+  - The credentials file, token files and private keys are ignored if other users can
+    access them.  **They must also be kept out of the sandbox.**
+  - Tools in the sandbox can be given any dummy token where they insist on having one.
+
+An agent can do anything with a credential that the rules allow, so make them narrow.
+In particular, a URL covered by a credential must not echo request headers back, or the
+agent gets to read the secret.
+
 ## Differences from mitmproxy-whitelist
 
   - URLs are built from where the request actually goes, not the `Host` header.

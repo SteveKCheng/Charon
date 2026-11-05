@@ -13,16 +13,26 @@ internal sealed class ForwardProxy
     private readonly IHttpForwarder _forwarder;
     private readonly Whitelist _whitelist;
     private readonly TrafficLog _log;
+    private readonly CredentialStore _credentials;
     private readonly HttpMessageInvoker _upstream;
+    private readonly ILogger<ForwardProxy> _logger;
     private readonly ForwarderRequestConfig _requestConfig;
 
-    public ForwardProxy(IHttpForwarder forwarder, Whitelist whitelist, TrafficLog log, CharonOptions options)
+    public ForwardProxy(IHttpForwarder forwarder, Whitelist whitelist, TrafficLog log, CredentialStore credentials,
+                        HttpMessageInvoker upstream, ILogger<ForwardProxy> logger, CharonOptions options)
     {
         _forwarder = forwarder;
         _whitelist = whitelist;
         _log = log;
+        _credentials = credentials;
+        _upstream = upstream;
+        _logger = logger;
         _requestConfig = new ForwarderRequestConfig { ActivityTimeout = options.ActivityTimeout };
+    }
 
+    /// <summary>Makes the client for connecting to upstream servers.</summary>
+    public static HttpMessageInvoker CreateUpstreamClient(CharonOptions options)
+    {
         var handler = new SocketsHttpHandler
         {
             // The environment's proxy settings are for clients, not for the proxy itself.
@@ -51,7 +61,7 @@ internal sealed class ForwardProxy
             handler.SslOptions.CertificateChainPolicy = policy;
         }
 
-        _upstream = new HttpMessageInvoker(handler);
+        return new HttpMessageInvoker(handler);
     }
 
     public async Task HandleAsync(HttpContext context)
@@ -102,17 +112,39 @@ internal sealed class ForwardProxy
             return;
         }
 
-        var entry = _log.Add(client, request.Method, url, allowed: true);
+        // This comes after the checks above: no rule here widens what clients may do.
+        var credential = _credentials.Find(destination);
+        string? credentialValue = null;
+        if (credential is not null)
+        {
+            try
+            {
+                credentialValue = await credential.GetHeaderValueAsync(context.RequestAborted);
+            }
+            catch (CredentialUnavailableException e)
+            {
+                // Going ahead without it would have the agent see confusing failures at best.
+                _logger.LogError("Credential {Name} is unavailable: {Message}", credential.Name, e.Message);
+                await RefuseAsync(context, client, StatusCodes.Status502BadGateway, request.Method, url,
+                                  $"The proxy could not obtain the credential '{credential.Name}' for this request.",
+                                  note: $"Credential {credential.Name} unavailable");
+                return;
+            }
+        }
+
+        var entry = _log.Add(client, request.Method, url, allowed: true,
+                             note: credential is null ? null : $"Credential {credential.Name}");
         long startTime = Stopwatch.GetTimestamp();
 
-        var error = await _forwarder.SendAsync(context, destination.GetLeftPart(UriPartial.Authority), _upstream,
-                                               _requestConfig, new FixedDestination(destination));
+        var error = await _forwarder.SendAsync(
+            context, destination.GetLeftPart(UriPartial.Authority), _upstream, _requestConfig,
+            new FixedDestination(destination, credential?.Header, credentialValue));
 
         _log.Update(entry with
         {
             Status = context.Response.StatusCode,
             DurationMs = Stopwatch.GetElapsedTime(startTime).TotalMilliseconds,
-            Note = error == ForwarderError.None ? null : error.ToString(),
+            Note = error == ForwarderError.None ? entry.Note : error.ToString(),
         });
     }
 
@@ -189,7 +221,8 @@ internal sealed class ForwardProxy
             $"{scheme}://{target.UrlHost}:{target.Port}", request.Path, request.QueryString);
     }
 
-    private sealed class FixedDestination(Uri destination) : HttpTransformer
+    private sealed class FixedDestination(Uri destination, string? credentialHeader, string? credentialValue)
+        : HttpTransformer
     {
         public override async ValueTask TransformRequestAsync(HttpContext httpContext,
                                                               HttpRequestMessage proxyRequest,
@@ -201,6 +234,12 @@ internal sealed class ForwardProxy
 
             // Derive it from the URI.  HttpClient also takes the TLS server name from here.
             proxyRequest.Headers.Host = null;
+
+            if (credentialHeader is not null)
+            {
+                proxyRequest.Headers.Remove(credentialHeader);
+                proxyRequest.Headers.TryAddWithoutValidation(credentialHeader, credentialValue);
+            }
         }
     }
 }

@@ -45,6 +45,10 @@ public static class CharonApp
         builder.Services.AddSingleton(log);
         builder.Services.AddSingleton(services => new Whitelist(
             options.WhitelistFile, services.GetRequiredService<ILoggerFactory>().CreateLogger<Whitelist>()));
+        builder.Services.AddSingleton(_ => ForwardProxy.CreateUpstreamClient(options));
+        builder.Services.AddSingleton(services => new CredentialStore(
+            options.CredentialsFile, services.GetRequiredService<HttpMessageInvoker>(),
+            services.GetRequiredService<ILoggerFactory>().CreateLogger<CredentialStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
 
         var app = builder.Build();

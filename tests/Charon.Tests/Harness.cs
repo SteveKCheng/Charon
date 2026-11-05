@@ -1,3 +1,4 @@
+using System.Buffers.Text;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -32,6 +33,21 @@ public sealed class Harness : IAsyncLifetime
     public List<string> UpstreamRequests { get; } = new();
 
     public string WhitelistFile => Path.Combine(Directory, "whitelist.txt");
+    public string CredentialsFile => Path.Combine(Directory, "credentials.json");
+    public string TokenFile => Path.Combine(Directory, "token");
+    public string AppKeyFile => Path.Combine(Directory, "app-key.pem");
+
+    private RSA AppKey { get; } = RSA.Create(2048);
+
+    /// <summary>Requests that the stand-in for GitHub got for tokens, with what they asked for.</summary>
+    public List<(long Installation, string Scope)> TokenRequests { get; } = new();
+
+    public int TokenRequestCount(long installation)
+    {
+        lock (TokenRequests)
+            return TokenRequests.Count(r => r.Installation == installation);
+    }
+
     public string CaFile => Path.Combine(Directory, "ca.crt");
 
     private static int FreePort()
@@ -76,8 +92,12 @@ public sealed class Harness : IAsyncLifetime
             GET: ^https://127\.0\.0\.1:{RawPort}/
             GET-BODY: ^https://localhost:[0-9]+/allowed/body-ok
             WEBSOCKET: ^https://localhost:[0-9]+/allowed/ws$
+            ANY: ^https?://localhost:[0-9]+/api/
+            ANY: ^https://127\.0\.0\.1:[0-9]+/api/
             GET: ^http://localhost:{UiPort}/
             """);
+
+        WriteCredentials();
 
         _rawUpstream = new TcpListener(IPAddress.Loopback, 0);
         _rawUpstream.Start();
@@ -103,8 +123,88 @@ public sealed class Harness : IAsyncLifetime
             CaCertificateFile = CaFile,
             CaKeyFile = Path.Combine(Directory, "ca.key"),
             UpstreamRootsFile = rootsFile,
+            CredentialsFile = CredentialsFile,
         });
         await _charon.StartAsync();
+    }
+
+    public const string StaticToken = "static-secret-token";
+
+    private static void WritePrivate(string path, string contents)
+    {
+        File.WriteAllText(path, contents);
+        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+
+    private void WriteCredentials()
+    {
+        WritePrivate(TokenFile, StaticToken + "\n");
+        WritePrivate(AppKeyFile, AppKey.ExportPkcs8PrivateKeyPem());
+
+        object App(long installationId) => new
+        {
+            appId = "1234",
+            installationId,
+            privateKeyFile = AppKeyFile,
+            apiBase = $"https://localhost:{HttpsPort}",
+            permissions = new Dictionary<string, string> { ["actions"] = "write" },
+            repositories = new[] { "proj" },
+        };
+
+        var origin = $"https://localhost:{HttpsPort}";
+        WritePrivate(CredentialsFile, JsonSerializer.Serialize(new object[]
+        {
+            new { name = "bearer", origin, url = "/api/bearer", tokenFile = TokenFile },
+            new { name = "basic", origin, url = "/api/basic", tokenFile = TokenFile, basicUser = "x-access-token" },
+            new { name = "key", origin, url = "/api/key", tokenFile = TokenFile, header = "x-api-key", scheme = "" },
+            new { name = "app", origin, url = "/api/app", gitHubApp = App(GoodInstallation) },
+            new { name = "short", origin, url = "/api/short", gitHubApp = App(ShortLivedInstallation) },
+            new { name = "refused", origin, url = "/api/refused", gitHubApp = App(BadInstallation) },
+            new { name = "no-file", origin, url = "/api/no-file", tokenFile = TokenFile + ".missing" },
+        }));
+    }
+
+    public const long GoodInstallation = 42;
+    public const long ShortLivedInstallation = 43;
+    public const long BadInstallation = 44;
+
+    /// <summary>Stands in for GitHub: verifies the App's token and issues a new one.</summary>
+    private async Task IssueTokenAsync(HttpContext context)
+    {
+        var installation = long.Parse((string)context.Request.RouteValues["id"]!);
+        using var body = await JsonDocument.ParseAsync(context.Request.Body);
+        var scope = body.RootElement.GetRawText();
+        var parts = (context.Request.Headers.Authorization.ToString().Split(' ') is ["Bearer", var jwt]
+            ? jwt : "").Split('.');
+        var claims = parts.Length == 3
+            ? JsonDocument.Parse(Base64Url.DecodeFromChars(parts[1])).RootElement : default;
+
+        bool valid = parts.Length == 3 &&
+            AppKey.VerifyData(Encoding.ASCII.GetBytes(parts[0] + "." + parts[1]), Base64Url.DecodeFromChars(parts[2]),
+                              HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1) &&
+            claims.GetProperty("iss").GetString() == "1234" &&
+            claims.GetProperty("exp").GetInt64() - claims.GetProperty("iat").GetInt64() <= 600;
+
+        lock (TokenRequests)
+            TokenRequests.Add((installation, scope));
+
+        if (!valid || installation == BadInstallation)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("not for you: do not repeat this");
+            return;
+        }
+
+        int count;
+        lock (TokenRequests)
+            count = TokenRequests.Count;
+
+        var lifetime = installation == ShortLivedInstallation ? TimeSpan.FromMinutes(1) : TimeSpan.FromHours(1);
+        await context.Response.WriteAsJsonAsync(new Dictionary<string, object>
+        {
+            ["token"] = $"ghs_installation_{installation}_{count}",
+            ["expires_at"] = DateTimeOffset.UtcNow + lifetime,
+        });
     }
 
     private async Task StartUpstreamAsync(X509Certificate2 leaf, X509Certificate2 untrustedLeaf)
@@ -151,6 +251,14 @@ public sealed class Harness : IAsyncLifetime
             var received = await socket.ReceiveAsync(buffer, default);
             await socket.SendAsync(buffer.AsMemory(0, received.Count), WebSocketMessageType.Text, true, default);
             await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, default);
+        });
+
+        app.MapPost("/app/installations/{id}/access_tokens", IssueTokenAsync);
+
+        app.Map("/api/bearer/redirect", context =>
+        {
+            context.Response.Redirect($"https://127.0.0.1:{HttpsPort}/api/bearer/redirected");
+            return Task.CompletedTask;
         });
 
         app.Map("/allowed/post/size", async context =>

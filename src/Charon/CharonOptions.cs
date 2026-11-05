@@ -18,6 +18,12 @@ public sealed class CharonOptions
     /// <summary>Same format as the whitelist of the mitmproxy-whitelist add-in.</summary>
     public string WhitelistFile { get; set; } = Path.Combine(ConfigDirectory, "whitelist.txt");
 
+    /// <summary>
+    /// JSON file of credentials to add to requests.  It and the files it refers
+    /// to must be kept out of sandboxes, and be accessible by their owner only.
+    /// </summary>
+    public string CredentialsFile { get; set; } = Path.Combine(ConfigDirectory, "credentials.json");
+
     /// <summary>PEM certificate of the interception CA; generated if it does not exist.</summary>
     public string CaCertificateFile { get; set; } = Path.Combine(ConfigDirectory, "ca.crt");
 

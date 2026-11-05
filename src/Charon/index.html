@@ -16,7 +16,7 @@
            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   td.url { font-family: ui-monospace, monospace; font-size: 13px; }
   th:nth-child(1) { width: 6em; } th:nth-child(2) { width: 5em; } th:nth-child(3) { width: 3.5em; }
-  th:nth-child(5) { width: 5em; } th:nth-child(6) { width: 11em; }
+  th:nth-child(5) { width: 5em; } th:nth-child(6) { width: 13em; } th:nth-child(7) { width: 11em; }
   tr.denied td { color: var(--denied); }
   tr.pending td:nth-child(3)::after { content: "…"; }
 </style>
@@ -29,7 +29,7 @@
   <span id="status">Connecting…</span>
 </header>
 <table>
-  <thead><tr><th>Time</th><th>Method</th><th>Status</th><th>URL</th><th>ms</th><th>Client</th></tr></thead>
+  <thead><tr><th>Time</th><th>Method</th><th>Status</th><th>URL</th><th>ms</th><th>Note</th><th>Client</th></tr></thead>
   <tbody id="rows"></tbody>
 </table>
 <script>
@@ -48,11 +48,12 @@ function matches(e) {
 
 function render(tr, e) {
   const cells = [new Date(e.time).toLocaleTimeString(), e.method, e.status ?? "", e.url,
-                 e.durationMs == null ? "" : Math.round(e.durationMs), e.client];
+                 e.durationMs == null ? "" : Math.round(e.durationMs), e.note ?? "", e.client];
   tr.replaceChildren(...cells.map((text, i) => {
     const td = document.createElement("td");
     td.textContent = text;
-    if (i === 3) { td.className = "url"; td.title = (e.note ? e.note + ": " : "") + e.url; }
+    if (i === 3 || i === 5) td.title = text;
+    if (i === 3) td.className = "url";
     return td;
   }));
   tr.className = !e.allowed ? "denied" : e.status == null ? "pending" : "";
