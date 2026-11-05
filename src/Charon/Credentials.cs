@@ -41,11 +41,17 @@ internal sealed record CredentialConfig
     /// <summary>Regular expression for the URLs at the origin that get the credential.</summary>
     public required string Url { get; init; }
 
+    /// The default value for <see cref="Header" /> if not specified.
+    public const string DefaultHeader = "Authorization";
+
     /// <summary>Header to set.  Any value for it from the client is replaced.</summary>
-    public string Header { get; init; } = "Authorization";
+    public string Header { get; init => field = value ?? DefaultHeader; } = DefaultHeader;
+
+    /// The default value for <see cref="Scheme" /> if not specified.
+    public const string DefaultScheme = "Bearer";
 
     /// <summary>Text before the token in the header value, if any.</summary>
-    public string Scheme { get; init; } = "Bearer";
+    public string Scheme { get; init => field = value ?? DefaultScheme; } = DefaultScheme;
 
     /// <summary>If set, send HTTP Basic authentication for this user, with the token as password.</summary>
     public string? BasicUser { get; init; }
@@ -85,18 +91,19 @@ internal sealed class Credential(CredentialConfig config, Regex url, ITokenSourc
     }
 }
 
+[JsonSourceGenerationOptions(JsonSerializerDefaults.Web, 
+    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, 
+    AllowTrailingCommas = true,
+    ReadCommentHandling =  JsonCommentHandling.Skip)]
+[JsonSerializable(typeof(CredentialConfig[]))]
+internal partial class CredentialStoreJsonContext : JsonSerializerContext
+{
+}
+
 /// <summary>The credentials to inject, which are never to be visible to the sandbox.</summary>
 internal sealed class CredentialStore : IDisposable
 {
     private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(100);
-
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        // A misspelling might otherwise silently leave out a restriction.
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-        AllowTrailingCommas = true,
-        ReadCommentHandling = JsonCommentHandling.Skip,
-    };
 
     private readonly HttpMessageInvoker _client;
     private readonly ILogger? _logger;
@@ -149,7 +156,8 @@ internal sealed class CredentialStore : IDisposable
         CredentialConfig[]? configs;
         try
         {
-            configs = JsonSerializer.Deserialize<CredentialConfig[]>(json, JsonOptions);
+            configs = JsonSerializer.Deserialize<CredentialConfig[]>(json,
+                CredentialStoreJsonContext.Default.CredentialConfigArray);
         }
         catch (JsonException e)
         {
