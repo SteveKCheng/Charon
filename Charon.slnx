@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+  </Configurations>
+  <Folder Name="/src/">
+    <Project Path="src/Charon/Charon.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Charon.Tests/Charon.Tests.csproj" />
+  </Folder>
+</Solution>
