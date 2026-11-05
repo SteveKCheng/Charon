@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Yarp.ReverseProxy.Forwarder;
@@ -50,6 +51,8 @@ public static class CharonApp
             options.CredentialsFile, services.GetRequiredService<HttpMessageInvoker>(),
             services.GetRequiredService<ILoggerFactory>().CreateLogger<CredentialStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
+        builder.Services.ConfigureHttpJsonOptions(o =>
+            o.SerializerOptions.TypeInfoResolverChain.Insert(0, CharonAppJsonContext.Default));
 
         if (options.TrafficDatabaseFile.Length > 0)
         {
@@ -85,11 +88,27 @@ public static class CharonApp
             TypedResults.ServerSentEvents(log.SubscribeAsync(cancellationToken)));
 
         app.MapGet("/api/status", (IServiceProvider services) =>
-            Results.Json(new { trafficDatabase = services.GetService<TrafficStore>()?.Status }));
+            Results.Json(new StatusMessage()
+                {
+                    TrafficDatabase = services.GetService<TrafficStore>()?.Status
+                },
+                CharonAppJsonContext.Default.StatusMessage));
 
         app.MapGet("/ca.crt", () =>
             Results.Text(ca.Certificate.ExportCertificatePem(), "application/x-pem-file"));
 
         return app;
     }
+
+    internal sealed class StatusMessage
+    {
+        public TrafficStoreStatus? TrafficDatabase { get; set; }
+    }
+}
+
+[JsonSourceGenerationOptions]
+[JsonSerializable(typeof(CharonApp.StatusMessage))]
+[JsonSerializable(typeof(TrafficEntry))]
+internal partial class CharonAppJsonContext : JsonSerializerContext
+{
 }
