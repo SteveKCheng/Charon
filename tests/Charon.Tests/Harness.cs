@@ -8,6 +8,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Data.Sqlite;
 
 namespace Charon.Tests;
 
@@ -35,6 +36,7 @@ public sealed class Harness : IAsyncLifetime
     public string WhitelistFile => Path.Combine(Directory, "whitelist.txt");
     public string CredentialsFile => Path.Combine(Directory, "credentials.json");
     public string TokenFile => Path.Combine(Directory, "token");
+    public string TrafficDatabaseFile => Path.Combine(Directory, "state", "traffic.db");
     public string AppKeyFile => Path.Combine(Directory, "app-key.pem");
 
     private RSA AppKey { get; } = RSA.Create(2048);
@@ -124,6 +126,7 @@ public sealed class Harness : IAsyncLifetime
             CaKeyFile = Path.Combine(Directory, "ca.key"),
             UpstreamRootsFile = rootsFile,
             CredentialsFile = CredentialsFile,
+            TrafficDatabaseFile = TrafficDatabaseFile,
         });
         await _charon.StartAsync();
     }
@@ -336,6 +339,25 @@ public sealed class Harness : IAsyncLifetime
             return chain.Build(new X509Certificate2(certificate!));
         };
         return socket;
+    }
+
+    /// <summary>Waits for a query of the traffic database to have a result, as writes are delayed.</summary>
+    public async Task<T> WaitForTrafficAsync<T>(string sql, Func<SqliteDataReader, T> read)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (true)
+        {
+            await using var database = new SqliteConnection($"Data Source={TrafficDatabaseFile};Pooling=False;Mode=ReadOnly");
+            database.Open();
+            await using var command = database.CreateCommand();
+            command.CommandText = sql;
+            await using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+                return read(reader);
+
+            Assert.True(DateTime.UtcNow < deadline, $"No result from: {sql}");
+            await Task.Delay(50);
+        }
     }
 
     /// <summary>Opens a connection to the proxy that is under the test's complete control.</summary>

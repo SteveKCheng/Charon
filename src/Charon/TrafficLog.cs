@@ -7,6 +7,10 @@ namespace Charon;
 /// <param name="Id">Identifies the request: an entry is re-published when the request finishes.</param>
 /// <param name="Status">HTTP status returned to the client, or null if not finished.</param>
 /// <param name="Note">Explains an unusual outcome.</param>
+/// <param name="Reason">Why the request was refused: one of a limited set of phrases.</param>
+/// <param name="RuleLine">Line in the whitelist of the rule that allowed the request.</param>
+/// <param name="Rule">Text of the rule that allowed the request.</param>
+/// <param name="Whitelist">Hash of the whitelist in force, if it got consulted.</param>
 public sealed record TrafficEntry(
     long Id,
     DateTimeOffset Time,
@@ -16,7 +20,11 @@ public sealed record TrafficEntry(
     bool Allowed,
     int? Status = null,
     double? DurationMs = null,
-    string? Note = null);
+    string? Note = null,
+    string? Reason = null,
+    int? RuleLine = null,
+    string? Rule = null,
+    string? Whitelist = null);
 
 /// <summary>
 /// Remembers the most recent requests, and notifies Web UI sessions of them.  Only
@@ -32,14 +40,21 @@ public sealed class TrafficLog(int capacity)
     private readonly List<Channel<TrafficEntry>> _subscribers = new();
     private long _lastId;
 
+    /// <summary>
+    /// Receives all new and updated entries.  This must not block,
+    /// since it is called in the course of handling requests.
+    /// </summary>
+    public Action<TrafficEntry>? Sink { get; set; }
+
     /// <summary>Records a new request.</summary>
     public TrafficEntry Add(string client, string method, string url, bool allowed,
-                            int? status = null, string? note = null)
+                            int? status = null, string? note = null, string? reason = null,
+                            int? ruleLine = null, string? rule = null, string? whitelist = null)
     {
         lock (_lock)
         {
             var entry = new TrafficEntry(++_lastId, DateTimeOffset.UtcNow, client, method, url, allowed,
-                                         status, null, note);
+                                         status, null, note, reason, ruleLine, rule, whitelist);
             Publish(entry);
             return entry;
         }
@@ -61,6 +76,8 @@ public sealed class TrafficLog(int capacity)
 
         foreach (var subscriber in _subscribers)
             subscriber.Writer.TryWrite(entry);
+
+        Sink?.Invoke(entry);
     }
 
     /// <summary>Streams the entries in the log, and then any new or updated ones as they come.</summary>

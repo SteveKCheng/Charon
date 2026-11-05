@@ -138,7 +138,7 @@ internal static class ProxyListener
         {
             log.Add(connection.RemoteEndPoint?.ToString() ?? "?", "CONNECT",
                     $"{authority.UrlHost}:{authority.Port}", allowed: false,
-                    note: "No HTTP request was received in the tunnel");
+                    note: "No HTTP request was received in the tunnel", reason: "no HTTP in tunnel");
         }
     }
 

@@ -122,6 +122,67 @@ An agent can do anything with a credential that the rules allow, so make them na
 In particular, a URL covered by a credential must not echo request headers back, or the
 agent gets to read the secret.
 
+## Traffic database
+
+All requests are recorded in an SQLite database, which outlasts restarts of the proxy.  It is at
+`~/.local/state/charon/traffic.db`, and can be queried at any time with `sqlite3`, even
+as the proxy runs.  The view `traffic` has the most useful columns, with readable times.
+
+```sql
+-- What is being denied, and why?
+SELECT method, url, reason, note, count(*) AS hits
+FROM requests WHERE NOT allowed
+GROUP BY 1, 2, 3, 4 ORDER BY hits DESC;
+
+-- Which rule let this through?
+SELECT time, url, rule FROM traffic WHERE url LIKE '%example.com%';
+
+-- What did the whitelist say when something was denied?
+SELECT contents FROM whitelists WHERE hash =
+  (SELECT whitelist FROM requests WHERE NOT allowed ORDER BY time_ms DESC LIMIT 1);
+```
+
+| `reason` | Meaning |
+|---|---|
+| `no GET rule`, `no POST rule`, `no PUT rule` | No rule of this type matches the URL |
+| `no GET-BODY rule`, `no WEBSOCKET rule` | As above: these need their own type of rule |
+| `no rule can allow this` | An HTTP method, or protocol upgrade, that no rule can grant |
+| `forbidden request` | Always refused: `note` tells what about it |
+| `host mismatch` | The `Host` header is not where the tunnel goes |
+| `bad request` | Not a valid request for a proxy |
+| `credential unavailable` | The credential named in `note` could not be obtained |
+| `CONNECT not first` | `CONNECT` is only understood at the start of a connection |
+| `no HTTP in tunnel` | The client never got to make a request: maybe it pins certificates, or is not speaking HTTP |
+
+A request without a `status` never finished, because the proxy stopped while it was in progress.
+
+Requests are written in the background, within a moment of being made, so the database is
+not on the path of requests.  That also means that recording can fail without stopping the
+proxy.  Such problems show up in the log and at the top of the Web UI.  What could not be
+recorded, if the queue overflows, is counted in the table `gaps`.
+
+These settings control it:
+
+| Setting | Default | |
+|---|---|---|
+| `TrafficDatabaseFile` | `~/.local/state/charon/traffic.db` | Empty for no database |
+| `TrafficRetention` | `14.00:00:00` | Requests older than this are removed |
+| `TrafficDatabaseMaxBytes` | 256 MiB | The oldest requests are removed to stay under this |
+
+The file does not shrink as requests get removed: the space is reused instead.  The limit does not
+count the write-ahead log, which is about 16 MB at most, and can be exceeded by a little
+between checks.  There has to be a limit, because clients could otherwise fill the disk.
+
+The database must be accessible to its owner only, like the files of credentials: it is created
+that way, and it is not used otherwise.  URLs can contain secrets.  Keep it out of sandboxes.
+
+To keep a copy, do not use `cp` while the proxy is running, as recent writes
+are in another file.  This takes a consistent copy:
+
+```
+sqlite3 ~/.local/state/charon/traffic.db ".backup /some/where/copy.db"
+```
+
 ## Differences from mitmproxy-whitelist
 
   - URLs are built from where the request actually goes, not the `Host` header.

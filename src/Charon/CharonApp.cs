@@ -51,6 +51,14 @@ public static class CharonApp
             services.GetRequiredService<ILoggerFactory>().CreateLogger<CredentialStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
 
+        if (options.TrafficDatabaseFile.Length > 0)
+        {
+            builder.Services.AddSingleton(services => new TrafficStore(
+                options, services.GetRequiredService<TrafficLog>(), services.GetRequiredService<Whitelist>(),
+                services.GetRequiredService<ILoggerFactory>().CreateLogger<TrafficStore>()));
+            builder.Services.AddHostedService(services => services.GetRequiredService<TrafficStore>());
+        }
+
         var app = builder.Build();
         var proxy = app.Services.GetRequiredService<ForwardProxy>();
 
@@ -75,6 +83,9 @@ public static class CharonApp
 
         app.MapGet("/api/traffic", (TrafficLog log, CancellationToken cancellationToken) =>
             TypedResults.ServerSentEvents(log.SubscribeAsync(cancellationToken)));
+
+        app.MapGet("/api/status", (IServiceProvider services) =>
+            Results.Json(new { trafficDatabase = services.GetService<TrafficStore>()?.Status }));
 
         app.MapGet("/ca.crt", () =>
             Results.Text(ca.Certificate.ExportCertificatePem(), "application/x-pem-file"));

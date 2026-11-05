@@ -42,6 +42,24 @@ public sealed class CharonOptions
     /// </summary>
     public TimeSpan ActivityTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// SQLite database to record requests in, so that they can be analyzed at any time.
+    /// Set to an empty string to not have one.  Like the files of the
+    /// CA, it should be kept away from sandboxes.
+    /// </summary>
+    public string TrafficDatabaseFile { get; set; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".local", "state", "charon", "traffic.db");
+
+    /// <summary>How long requests stay in the database.</summary>
+    public TimeSpan TrafficRetention { get; set; } = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// Size that the database is kept under, by removing its oldest requests.  There has to be a
+    /// limit, or else a client could fill the disk just by making requests.
+    /// </summary>
+    public long TrafficDatabaseMaxBytes { get; set; } = 256L * 1024 * 1024;
+
     /// <summary>Number of requests retained for display in the Web UI.</summary>
     public int TrafficLogCapacity { get; set; } = 10_000;
 }

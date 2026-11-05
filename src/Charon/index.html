@@ -18,6 +18,7 @@
   th:nth-child(1) { width: 6em; } th:nth-child(2) { width: 5em; } th:nth-child(3) { width: 3.5em; }
   th:nth-child(5) { width: 5em; } th:nth-child(6) { width: 13em; } th:nth-child(7) { width: 11em; }
   tr.denied td { color: var(--denied); }
+  #problem { color: var(--denied); }
   tr.pending td:nth-child(3)::after { content: "…"; }
 </style>
 </head>
@@ -26,6 +27,7 @@
   <h1>Charon</h1>
   <input id="filter" type="search" placeholder="Filter URLs" aria-label="Filter URLs">
   <label><input id="deniedOnly" type="checkbox"> Denied only</label>
+  <span id="problem" role="alert"></span>
   <span id="status">Connecting…</span>
 </header>
 <table>
@@ -48,7 +50,7 @@ function matches(e) {
 
 function render(tr, e) {
   const cells = [new Date(e.time).toLocaleTimeString(), e.method, e.status ?? "", e.url,
-                 e.durationMs == null ? "" : Math.round(e.durationMs), e.note ?? "", e.client];
+                 e.durationMs == null ? "" : Math.round(e.durationMs), e.note ?? e.reason ?? "", e.client];
   tr.replaceChildren(...cells.map((text, i) => {
     const td = document.createElement("td");
     td.textContent = text;
@@ -86,6 +88,20 @@ const events = new EventSource("/api/traffic");
 events.onopen = () => { status.textContent = "Live"; };
 events.onerror = () => { status.textContent = "Disconnected: retrying…"; };
 events.onmessage = m => onEntry(JSON.parse(m.data));
+
+// Requests going unrecorded should not pass unnoticed.
+async function checkStatus() {
+  try {
+    const database = (await (await fetch("/api/status")).json()).trafficDatabase;
+    const problems = [];
+    if (database && !database.healthy) problems.push("Traffic database: " + database.error);
+    if (database && database.droppedEvents > 0) problems.push(database.droppedEvents + " events not recorded");
+    document.getElementById("problem").textContent = problems.join(" · ");
+  } catch { /* The connection status already shows this. */ }
+}
+
+checkStatus();
+setInterval(checkStatus, 5000);
 </script>
 </body>
 </html>

@@ -81,7 +81,8 @@ internal sealed class ForwardProxy
             context.Response.Headers.Connection = "close";
             await RefuseAsync(context, client, StatusCodes.Status405MethodNotAllowed,
                               request.Method, tunnel is null ? "(proxy)" : "(tunnel)",
-                              "CONNECT must be the first request on a connection to this proxy.");
+                              "CONNECT must be the first request on a connection to this proxy.",
+                              reason: "CONNECT not first");
             return;
         }
 
@@ -90,7 +91,8 @@ internal sealed class ForwardProxy
             await RefuseAsync(context, client,
                               tunnel is null ? StatusCodes.Status400BadRequest
                                              : StatusCodes.Status421MisdirectedRequest,
-                              request.Method, context.Features.Get<IHttpRequestFeature>()?.RawTarget ?? "", problem!);
+                              request.Method, context.Features.Get<IHttpRequestFeature>()?.RawTarget ?? "", problem!,
+                              reason: tunnel is null ? "bad request" : "host mismatch", note: problem);
             return;
         }
 
@@ -99,16 +101,22 @@ internal sealed class ForwardProxy
         if (RequestPolicy.FindViolation(request, destination) is { } violation)
         {
             await RefuseAsync(context, client, StatusCodes.Status403Forbidden, request.Method, url,
-                              $"Access Denied: {violation}", note: violation);
+                              $"Access Denied: {violation}", reason: "forbidden request", note: violation);
             return;
         }
 
-        if (capability is not { } required ||
-            !_whitelist.IsAllowed(required, url, destination.IdnHost.ToLowerInvariant()))
+        var decision = capability is { } required
+            ? _whitelist.Evaluate(required, url, destination.IdnHost.ToLowerInvariant())
+            : new WhitelistDecision(null, _whitelist.Version.Hash);
+
+        if (decision.Rule is not { } rule)
         {
             await RefuseAsync(context, client, StatusCodes.Status403Forbidden, request.Method, url,
                               $"Access Denied: '{url}' (method {request.Method}{Describe(capability)}) " +
-                              "is disallowed by the sandbox's whitelist.");
+                              "is disallowed by the sandbox's whitelist.",
+                              reason: capability is { } needed ? $"no {RequestPolicy.RuleType(needed)} rule"
+                                                               : "no rule can allow this",
+                              whitelist: decision.Version);
             return;
         }
 
@@ -127,13 +135,15 @@ internal sealed class ForwardProxy
                 _logger.LogError("Credential {Name} is unavailable: {Message}", credential.Name, e.Message);
                 await RefuseAsync(context, client, StatusCodes.Status502BadGateway, request.Method, url,
                                   $"The proxy could not obtain the credential '{credential.Name}' for this request.",
-                                  note: $"Credential {credential.Name} unavailable");
+                                  reason: "credential unavailable", note: credential.Name,
+                                  whitelist: decision.Version);
                 return;
             }
         }
 
         var entry = _log.Add(client, request.Method, url, allowed: true,
-                             note: credential is null ? null : $"Credential {credential.Name}");
+                             note: credential is null ? null : $"Credential {credential.Name}",
+                             ruleLine: rule.Line, rule: rule.Text, whitelist: decision.Version);
         long startTime = Stopwatch.GetTimestamp();
 
         var error = await _forwarder.SendAsync(
@@ -158,9 +168,11 @@ internal sealed class ForwardProxy
     };
 
     private Task RefuseAsync(HttpContext context, string client, int status,
-                             string method, string url, string message, string? note = null)
+                             string method, string url, string message, string reason,
+                             string? note = null, string? whitelist = null)
     {
-        _log.Add(client, method, url, allowed: false, status: status, note: note);
+        _log.Add(client, method, url, allowed: false, status: status, note: note,
+                 reason: reason, whitelist: whitelist);
         context.Response.StatusCode = status;
         context.Response.ContentType = "text/plain";
         return context.Response.WriteAsync(message + "\n");

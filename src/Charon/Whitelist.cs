@@ -1,6 +1,25 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Charon;
+
+/// <summary>A line of the whitelist that allows something.</summary>
+internal sealed record WhitelistRule(int Line, string Text);
+
+/// <summary>One state of the whitelist.</summary>
+/// <param name="Hash">Identifies the contents.</param>
+/// <param name="Contents">The text of the file.</param>
+internal sealed record WhitelistVersion(string Hash, string Contents)
+{
+    public static WhitelistVersion Of(string contents) => new(
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(contents)).AsSpan(0, 8)), contents);
+}
+
+/// <summary>The outcome of checking a request against the whitelist.</summary>
+/// <param name="Rule">The rule that allows the request, or null if it is denied.</param>
+/// <param name="Version">The hash of the whitelist that this was decided by.</param>
+internal readonly record struct WhitelistDecision(WhitelistRule? Rule, string Version);
 
 /// <summary>
 /// The URLs that clients may access: anything that does not match is denied.
@@ -36,31 +55,54 @@ internal sealed class Whitelist : IDisposable
         @"^\^https\??://(?:\((?:\?:)?\[-a-z0-9\.\]\+\\\.\)\?)?(?<host>(?:[-a-z0-9_]|\\\.)+)(?:[/:$]|\\/|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    private sealed record CompiledRule(Regex Regex, WhitelistRule Source);
+
     private sealed class RuleSet
     {
-        public readonly Dictionary<string, List<Regex>> ByHost = new();
-        public readonly List<Regex> Unindexed = new();
+        public readonly Dictionary<string, List<CompiledRule>> ByHost = new();
+        public readonly List<CompiledRule> Unindexed = new();
     }
+
+    /// <summary>Rules along with their origin, swapped in as one so that the two always agree.</summary>
+    private sealed record Snapshot(RuleSet[] Rules, WhitelistVersion Version);
+
+    private static readonly Snapshot Nothing = new(NewRuleSets(), WhitelistVersion.Of(""));
 
     private readonly ILogger? _logger;
     private readonly PolledFile _file;
 
-    private volatile RuleSet[] _rules = NewRuleSets();
+    private volatile Snapshot _current = Nothing;
+
+    /// <summary>The whitelist now in force.</summary>
+    public WhitelistVersion Version => _current.Version;
+
+    /// <summary>Raised when the whitelist in force changes.</summary>
+    public event Action<WhitelistVersion>? Changed;
 
     /// <summary>Loads a file, and follows changes to it.  If it is gone then nothing is allowed.</summary>
     public Whitelist(string path, ILogger? logger = null)
     {
         _logger = logger;
-        _file = new PolledFile(path, Load, () => _rules = NewRuleSets(), logger);
+        _file = new PolledFile(path, Load, () => Replace(Nothing), logger);
     }
 
     public void Dispose() => _file.Dispose();
 
     private void Load(string path)
     {
-        _rules = Parse(File.ReadAllLines(path), out int count, out int unindexed);
+        var contents = File.ReadAllText(path);
+        var rules = Parse(contents.Split('\n'), out int count, out int unindexed);
+        Replace(new Snapshot(rules, WhitelistVersion.Of(contents)));
         _logger?.LogInformation("Loaded {Count} rules from {Path}, of which {Unindexed} are not indexed by host",
                                 count, path, unindexed);
+    }
+
+    private void Replace(Snapshot snapshot)
+    {
+        bool changed = snapshot.Version != _current.Version;
+        _current = snapshot;
+        if (changed)
+            Changed?.Invoke(snapshot.Version);
     }
 
     private static RuleSet[] NewRuleSets()
@@ -75,39 +117,47 @@ internal sealed class Whitelist : IDisposable
     /// <param name="capability">What the request needs.</param>
     /// <param name="url">The URL exactly as it will be requested upstream.</param>
     /// <param name="host">Host of the URL, in lower case.</param>
-    public bool IsAllowed(Capability capability, string url, string host)
+    public WhitelistDecision Evaluate(Capability capability, string url, string host)
     {
-        var rules = _rules[(int)capability];
+        var snapshot = _current;
+        var rules = snapshot.Rules[(int)capability];
 
         try
         {
             for (int start = 0; start >= 0;)
             {
-                if (rules.ByHost.TryGetValue(host[start..], out var bucket) && AnyMatch(bucket, url))
-                    return true;
+                if (rules.ByHost.TryGetValue(host[start..], out var bucket) &&
+                    FindMatch(bucket, url) is { } rule)
+                {
+                    return new WhitelistDecision(rule, snapshot.Version.Hash);
+                }
 
                 int dot = host.IndexOf('.', start);
                 start = dot < 0 ? -1 : dot + 1;
             }
 
-            return AnyMatch(rules.Unindexed, url);
+            return new WhitelistDecision(FindMatch(rules.Unindexed, url), snapshot.Version.Hash);
         }
         catch (RegexMatchTimeoutException)
         {
             _logger?.LogWarning("Denying {Url}: timed out while matching rules", url);
-            return false;
+            return new WhitelistDecision(null, snapshot.Version.Hash);
         }
     }
 
-    private static bool AnyMatch(List<Regex> rules, string url)
+    /// <summary>Whether a request is allowed: see <see cref="Evaluate"/>.</summary>
+    public bool IsAllowed(Capability capability, string url, string host) =>
+        Evaluate(capability, url, host).Rule is not null;
+
+    private static WhitelistRule? FindMatch(List<CompiledRule> rules, string url)
     {
         foreach (var rule in rules)
         {
-            if (rule.IsMatch(url))
-                return true;
+            if (rule.Regex.IsMatch(url))
+                return rule.Source;
         }
 
-        return false;
+        return null;
     }
 
     private static RuleSet[] Parse(string[] lines, out int count, out int unindexed)
@@ -136,10 +186,11 @@ internal sealed class Whitelist : IDisposable
             if (methods is null || pattern.Length == 0)
                 throw new FormatException($"Invalid rule at line {i + 1}");
 
-            Regex regex;
+            CompiledRule rule;
             try
             {
-                regex = new Regex(pattern, PatternOptions, MatchTimeout);
+                rule = new CompiledRule(new Regex(pattern, PatternOptions, MatchTimeout),
+                                        new WhitelistRule(i + 1, line));
             }
             catch (ArgumentException e)
             {
@@ -152,13 +203,13 @@ internal sealed class Whitelist : IDisposable
                 var set = sets[(int)method];
                 if (host is null)
                 {
-                    set.Unindexed.Add(regex);
+                    set.Unindexed.Add(rule);
                 }
                 else
                 {
                     if (!set.ByHost.TryGetValue(host, out var bucket))
-                        set.ByHost[host] = bucket = new List<Regex>(1);
-                    bucket.Add(regex);
+                        set.ByHost[host] = bucket = new List<CompiledRule>(1);
+                    bucket.Add(rule);
                 }
             }
 

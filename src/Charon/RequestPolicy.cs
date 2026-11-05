@@ -46,6 +46,17 @@ internal static class RequestPolicy
         _ => null,
     };
 
+    /// <summary>The type of rule, as written in the whitelist, that grants a capability.</summary>
+    public static string RuleType(Capability capability) => capability switch
+    {
+        Capability.Get => "GET",
+        Capability.Post => "POST",
+        Capability.Put => "PUT",
+        Capability.GetWithBody => "GET-BODY",
+        Capability.WebSocket => "WEBSOCKET",
+        _ => throw new ArgumentOutOfRangeException(nameof(capability)),
+    };
+
     /// <summary>Gets what a request needs a rule to grant, or null if nothing can grant it.</summary>
     public static Capability? GetRequiredCapability(HttpContext context)
     {
