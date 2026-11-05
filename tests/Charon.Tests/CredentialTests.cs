@@ -283,7 +283,7 @@ public sealed class CredentialConfigTests
             var config = new CredentialConfig { Name = "a", Origin = "https://x.test", Url = "." };
             var credential = new Credential(config, new(""), new FileTokenSource(path));
             await Assert.ThrowsAsync<CredentialUnavailableException>(
-                async () => await credential.GetHeaderValueAsync(default));
+                async () => await credential.GetValueAsync(default));
         }
         finally
         {

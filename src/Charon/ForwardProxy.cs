@@ -17,9 +17,12 @@ internal sealed class ForwardProxy
     private readonly HttpMessageInvoker _upstream;
     private readonly ILogger<ForwardProxy> _logger;
     private readonly ForwarderRequestConfig _requestConfig;
+    private readonly TrafficStore? _headerStore;
+    private readonly int _headersMaxBytes;
 
     public ForwardProxy(IHttpForwarder forwarder, Whitelist whitelist, TrafficLog log, CredentialStore credentials,
-                        HttpMessageInvoker upstream, ILogger<ForwardProxy> logger, CharonOptions options)
+                        HttpMessageInvoker upstream, ILogger<ForwardProxy> logger, CharonOptions options,
+                        TrafficStore? store = null)
     {
         _forwarder = forwarder;
         _whitelist = whitelist;
@@ -28,6 +31,8 @@ internal sealed class ForwardProxy
         _upstream = upstream;
         _logger = logger;
         _requestConfig = new ForwarderRequestConfig { ActivityTimeout = options.ActivityTimeout };
+        _headerStore = options.TrafficHeaders ? store : null;
+        _headersMaxBytes = options.TrafficHeadersMaxBytes;
     }
 
     /// <summary>Makes the client for connecting to upstream servers.</summary>
@@ -122,12 +127,12 @@ internal sealed class ForwardProxy
 
         // This comes after the checks above: no rule here widens what clients may do.
         var credential = _credentials.Find(destination);
-        string? credentialValue = null;
+        CredentialValue? credentialValue = null;
         if (credential is not null)
         {
             try
             {
-                credentialValue = await credential.GetHeaderValueAsync(context.RequestAborted);
+                credentialValue = await credential.GetValueAsync(context.RequestAborted);
             }
             catch (CredentialUnavailableException e)
             {
@@ -146,9 +151,14 @@ internal sealed class ForwardProxy
                              ruleLine: rule.Line, rule: rule.Text, whitelist: decision.Version);
         long startTime = Stopwatch.GetTimestamp();
 
+        // What the client sent: this is before any credential gets added.
+        RecordHeaders(entry, request.Headers, isResponse: false, credential: null);
+
         var error = await _forwarder.SendAsync(
             context, destination.GetLeftPart(UriPartial.Authority), _upstream, _requestConfig,
-            new FixedDestination(destination, credential?.Header, credentialValue));
+            new FixedDestination(destination, credential?.Header, credentialValue?.HeaderValue));
+
+        RecordHeaders(entry, context.Response.Headers, isResponse: true, credentialValue);
 
         _log.Update(entry with
         {
@@ -171,11 +181,30 @@ internal sealed class ForwardProxy
                              string method, string url, string message, string reason,
                              string? note = null, string? whitelist = null)
     {
-        _log.Add(client, method, url, allowed: false, status: status, note: note,
-                 reason: reason, whitelist: whitelist);
+        var entry = _log.Add(client, method, url, allowed: false, status: status, note: note,
+                             reason: reason, whitelist: whitelist);
+        RecordHeaders(entry, context.Request.Headers, isResponse: false, credential: null);
         context.Response.StatusCode = status;
         context.Response.ContentType = "text/plain";
         return context.Response.WriteAsync(message + "\n");
+    }
+
+    private void RecordHeaders(TrafficEntry entry, IHeaderDictionary headers, bool isResponse,
+                               CredentialValue? credential)
+    {
+        if (_headerStore is null)
+            return;
+
+        try
+        {
+            var json = HeaderCapture.ToJson(headers, _headersMaxBytes, credential);
+            _headerStore.AddHeaders(entry, isResponse ? null : json, isResponse ? json : null);
+        }
+        catch (ArgumentException e)
+        {
+            // Text that cannot be encoded.  Recording is not to get in the way of the request.
+            _logger.LogWarning("Could not record headers for {Url}: {Message}", entry.Url, e.Message);
+        }
     }
 
     /// <summary>

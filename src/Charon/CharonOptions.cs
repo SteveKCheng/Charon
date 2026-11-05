@@ -60,6 +60,16 @@ public sealed class CharonOptions
     /// </summary>
     public long TrafficDatabaseMaxBytes { get; set; } = 256L * 1024 * 1024;
 
+    /// <summary>
+    /// Whether to record the headers of requests and responses in the database.  They are as
+    /// received from the client, so without injected credentials, and with the values
+    /// of the usual headers for secrets replaced.  Each request takes up much more space.
+    /// </summary>
+    public bool TrafficHeaders { get; set; }
+
+    /// <summary>Limit on what is recorded of the headers of a single request or response.</summary>
+    public int TrafficHeadersMaxBytes { get; set; } = 16 * 1024;
+
     /// <summary>Number of requests retained for display in the Web UI.</summary>
     public int TrafficLogCapacity { get; set; } = 10_000;
 }

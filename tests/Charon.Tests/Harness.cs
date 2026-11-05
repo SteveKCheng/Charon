@@ -37,6 +37,9 @@ public sealed class Harness : IAsyncLifetime
     public string CredentialsFile => Path.Combine(Directory, "credentials.json");
     public string TokenFile => Path.Combine(Directory, "token");
     public string TrafficDatabaseFile => Path.Combine(Directory, "state", "traffic.db");
+
+    /// <summary>Set before starting.</summary>
+    public bool RecordHeaders { get; init; } = true;
     public string AppKeyFile => Path.Combine(Directory, "app-key.pem");
 
     private RSA AppKey { get; } = RSA.Create(2048);
@@ -127,6 +130,7 @@ public sealed class Harness : IAsyncLifetime
             UpstreamRootsFile = rootsFile,
             CredentialsFile = CredentialsFile,
             TrafficDatabaseFile = TrafficDatabaseFile,
+            TrafficHeaders = RecordHeaders,
         });
         await _charon.StartAsync();
     }
@@ -257,6 +261,21 @@ public sealed class Harness : IAsyncLifetime
         });
 
         app.MapPost("/app/installations/{id}/access_tokens", IssueTokenAsync);
+
+        app.Map("/api/bearer/echo", context =>
+        {
+            context.Response.Headers["X-Echo"] = context.Request.Headers.Authorization;
+            context.Response.Headers["X-Echo-Token"] = context.Request.Headers.Authorization.ToString().Split(' ')[^1];
+            context.Response.Headers["Set-Cookie"] = "session=from-upstream";
+            context.Response.Headers["X-Innocent"] = "kept";
+            return Task.CompletedTask;
+        });
+
+        app.Map("/api/basic/echo", context =>
+        {
+            context.Response.Headers["X-Echo-Token"] = context.Request.Headers.Authorization.ToString().Split(' ')[^1];
+            return Task.CompletedTask;
+        });
 
         app.Map("/api/bearer/redirect", context =>
         {

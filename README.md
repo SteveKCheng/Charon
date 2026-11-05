@@ -168,6 +168,8 @@ These settings control it:
 | `TrafficDatabaseFile` | `~/.local/state/charon/traffic.db` | Empty for no database |
 | `TrafficRetention` | `14.00:00:00` | Requests older than this are removed |
 | `TrafficDatabaseMaxBytes` | 256 MiB | The oldest requests are removed to stay under this |
+| `TrafficHeaders` | `false` | Also record headers |
+| `TrafficHeadersMaxBytes` | 16 KiB | Limit for each request and each response |
 
 The file does not shrink as requests get removed: the space is reused instead.  The limit does not
 count the write-ahead log, which is about 16 MB at most, and can be exceeded by a little
@@ -182,6 +184,26 @@ are in another file.  This takes a consistent copy:
 ```
 sqlite3 ~/.local/state/charon/traffic.db ".backup /some/where/copy.db"
 ```
+
+### Headers
+
+With `TrafficHeaders` on, the table `headers` has the headers of requests and responses, as JSON
+arrays of pairs of names and values.  This includes requests that were denied.
+
+```sql
+SELECT r.url, e.value ->> 1 AS user_agent
+FROM requests r JOIN headers h USING (session, id), json_each(h.request) e
+WHERE lower(e.value ->> 0) = 'user-agent';
+```
+
+What is recorded for requests is as received from the client, so injected credentials are never
+in it.  The values of `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`,
+`Api-Key` and `X-Auth-Token` are replaced with `[redacted]`, and so is any value in a
+response containing the secret just injected.  Other headers that happen to contain secrets are not
+detected.  Headers over the limit are cut off, and marked with a last pair named `(truncated)`.
+
+Headers take up much more space, so the database then holds far fewer requests within its
+limit.  Under very heavy load they are dropped before anything else, which `gaps` keeps count of.
 
 ## Differences from mitmproxy-whitelist
 

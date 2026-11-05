@@ -16,6 +16,15 @@ internal interface ITokenSource
     ValueTask<string> GetTokenAsync(CancellationToken cancellationToken);
 }
 
+/// <summary>What goes in the header of a request for a credential.</summary>
+/// <param name="HeaderValue">The value to set the header to.</param>
+/// <param name="Secrets">The forms in which the secret appears in the value.</param>
+internal sealed record CredentialValue(string HeaderValue, string[] Secrets)
+{
+    /// <summary>Whether some text gives away the secret.</summary>
+    public bool AppearsIn(string text) => Secrets.Any(s => text.Contains(s, StringComparison.Ordinal));
+}
+
 /// <summary>How a credential is described in the credentials file.</summary>
 internal sealed record CredentialConfig
 {
@@ -59,7 +68,7 @@ internal sealed class Credential(CredentialConfig config, Regex url, ITokenSourc
 
     /// <summary>Gets the value to set the header to.</summary>
     /// <exception cref="CredentialUnavailableException">The token cannot be had.</exception>
-    public async ValueTask<string> GetHeaderValueAsync(CancellationToken cancellationToken)
+    public async ValueTask<CredentialValue> GetValueAsync(CancellationToken cancellationToken)
     {
         var token = await source.GetTokenAsync(cancellationToken);
 
@@ -67,9 +76,12 @@ internal sealed class Credential(CredentialConfig config, Regex url, ITokenSourc
             throw new CredentialUnavailableException("The token is empty or has control characters.");
 
         if (config.BasicUser is { } user)
-            return "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{token}"));
+        {
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{token}"));
+            return new CredentialValue("Basic " + encoded, [token, encoded]);
+        }
 
-        return config.Scheme.Length > 0 ? $"{config.Scheme} {token}" : token;
+        return new CredentialValue(config.Scheme.Length > 0 ? $"{config.Scheme} {token}" : token, [token]);
     }
 }
 

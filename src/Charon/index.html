@@ -96,6 +96,7 @@ async function checkStatus() {
     const problems = [];
     if (database && !database.healthy) problems.push("Traffic database: " + database.error);
     if (database && database.droppedEvents > 0) problems.push(database.droppedEvents + " events not recorded");
+    if (database && database.droppedHeaders > 0) problems.push(database.droppedHeaders + " sets of headers not recorded");
     document.getElementById("problem").textContent = problems.join(" · ");
   } catch { /* The connection status already shows this. */ }
 }

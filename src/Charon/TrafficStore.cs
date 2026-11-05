@@ -9,7 +9,8 @@ namespace Charon;
 /// <param name="Healthy">Whether writing to the database is working.</param>
 /// <param name="Error">What is wrong, if it is not.</param>
 /// <param name="DroppedEvents">Events lost since starting, because the queue overflowed.</param>
-public sealed record TrafficStoreStatus(string Path, bool Healthy, string? Error, long DroppedEvents);
+/// <param name="DroppedHeaders">The same, for sets of headers.</param>
+public sealed record TrafficStoreStatus(string Path, bool Healthy, string? Error, long DroppedEvents, long DroppedHeaders);
 
 /// <summary>
 /// Records requests in an SQLite database, which outlives the process, for the user to query.
@@ -26,6 +27,12 @@ public sealed record TrafficStoreStatus(string Path, bool Healthy, string? Error
 /// A request is written when it starts, and updated when it finishes.  So those still
 /// unfinished when the process dies are there, without a status.
 /// </para>
+/// <para>
+/// Headers, if they are recorded, have a table and a queue of their own.  They can be much larger
+/// than the rest, and they make writing several times slower.  So, under load, they
+/// are the first to go, and the bound on their memory use is the length of their
+/// queue multiplied by the limit on the size of each item.
+/// </para>
 /// </remarks>
 internal sealed class TrafficStore : IHostedService
 {
@@ -33,7 +40,15 @@ internal sealed class TrafficStore : IHostedService
 
     private const int DefaultQueueCapacity = 64 * 1024;
 
+    private const int DefaultHeaderQueueCapacity = 4096;
+
     private const int MaxBatchSize = 4096;
+
+    /// <summary>
+    /// Limit on the text of headers in a batch.  The size limit of the database is
+    /// checked between batches, so this is by how much the database can overshoot it.
+    /// </summary>
+    private const int MaxHeaderBatchLength = 1024 * 1024;
 
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(250);
 
@@ -68,6 +83,17 @@ internal sealed class TrafficStore : IHostedService
 
         CREATE INDEX IF NOT EXISTS denied_requests_by_time ON requests(time_ms) WHERE NOT allowed;
 
+        -- Optional.  Values are JSON arrays of pairs of names and values.
+        CREATE TABLE IF NOT EXISTS headers(
+            session INTEGER NOT NULL,
+            id INTEGER NOT NULL,
+            time_ms INTEGER NOT NULL,
+            request TEXT,
+            response TEXT,
+            PRIMARY KEY(session, id));
+
+        CREATE INDEX IF NOT EXISTS headers_by_time ON headers(time_ms);
+
         -- Every version of the whitelist, to find out what the rules were at some point.
         CREATE TABLE IF NOT EXISTS whitelists(
             hash TEXT PRIMARY KEY,
@@ -78,7 +104,8 @@ internal sealed class TrafficStore : IHostedService
         CREATE TABLE IF NOT EXISTS gaps(
             session INTEGER NOT NULL,
             time_ms INTEGER NOT NULL,
-            dropped_events INTEGER NOT NULL);
+            dropped_events INTEGER NOT NULL,
+            dropped_headers INTEGER NOT NULL);
 
         CREATE VIEW IF NOT EXISTS traffic AS
             SELECT datetime(time_ms / 1000, 'unixepoch', 'localtime') AS time,
@@ -93,6 +120,14 @@ internal sealed class TrafficStore : IHostedService
             status = excluded.status, duration_ms = excluded.duration_ms, note = excluded.note
         """;
 
+    private const string UpsertHeaders = """
+        INSERT INTO headers VALUES($session, $id, $time, $request, $response)
+        ON CONFLICT(session, id) DO UPDATE SET
+            request = coalesce(excluded.request, request), response = coalesce(excluded.response, response)
+        """;
+
+    private sealed record HeaderRecord(long Id, DateTimeOffset Time, string? Request, string? Response);
+
     private readonly string _path;
     private readonly long _maxBytes;
     private readonly TimeSpan _retention;
@@ -101,6 +136,7 @@ internal sealed class TrafficStore : IHostedService
     private readonly long _session = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     private readonly Channel<TrafficEntry> _queue;
+    private readonly Channel<HeaderRecord> _headerQueue;
     private readonly ConcurrentQueue<WhitelistVersion> _newWhitelists = new();
 
     /// <summary>
@@ -108,6 +144,7 @@ internal sealed class TrafficStore : IHostedService
     /// finish within a batch, and it takes writing just the last entry, which has everything.
     /// </summary>
     private readonly Dictionary<long, TrafficEntry> _batch = new(MaxBatchSize);
+    private readonly List<HeaderRecord> _headerBatch = new(MaxBatchSize);
 
     private readonly CancellationTokenSource _stopping = new();
     private Task _worker = Task.CompletedTask;
@@ -115,17 +152,21 @@ internal sealed class TrafficStore : IHostedService
     private SqliteConnection? _database;
     private SqliteCommand? _upsert;
     private SqliteParameter[] _upsertParameters = [];
+    private SqliteCommand? _upsertHeaders;
     private DateTime _nextAgePrune;
 
     private long _droppedEvents;
     private long _unrecordedDrops;
+    private long _droppedHeaders;
+    private long _unrecordedHeaderDrops;
     private volatile string? _error;
 
     /// <summary>Time to wait before trying again after failing to write to the database.</summary>
     internal TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(5);
 
     public TrafficStore(CharonOptions options, TrafficLog log, Whitelist whitelist, ILogger? logger = null,
-                        int queueCapacity = DefaultQueueCapacity)
+                        int queueCapacity = DefaultQueueCapacity,
+                        int headerQueueCapacity = DefaultHeaderQueueCapacity)
     {
         _path = options.TrafficDatabaseFile;
         _maxBytes = options.TrafficDatabaseMaxBytes;
@@ -145,12 +186,31 @@ internal sealed class TrafficStore : IHostedService
                 Interlocked.Increment(ref _unrecordedDrops);
             });
 
+        _headerQueue = Channel.CreateBounded<HeaderRecord>(
+            new BoundedChannelOptions(headerQueueCapacity)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+            },
+            _ =>
+            {
+                Interlocked.Increment(ref _droppedHeaders);
+                Interlocked.Increment(ref _unrecordedHeaderDrops);
+            });
+
         log.Sink = entry => _queue.Writer.TryWrite(entry);
         whitelist.Changed += _newWhitelists.Enqueue;
     }
 
     public TrafficStoreStatus Status =>
-        new(_path, _error is null, _error, Interlocked.Read(ref _droppedEvents));
+        new(_path, _error is null, _error, Interlocked.Read(ref _droppedEvents), Interlocked.Read(ref _droppedHeaders));
+
+    /// <summary>Queues headers to be recorded, for the request of a log entry.</summary>
+    /// <param name="entry">The entry for the request.</param>
+    /// <param name="request">The headers of the request, if they are being added now.</param>
+    /// <param name="response">The headers of the response, if they are being added now.</param>
+    public void AddHeaders(TrafficEntry entry, string? request, string? response) =>
+        _headerQueue.Writer.TryWrite(new HeaderRecord(entry.Id, entry.Time, request, response));
 
     /// <remarks>
     /// This is not a BackgroundService, which does not run its task at all if it gets stopped
@@ -209,12 +269,21 @@ internal sealed class TrafficStore : IHostedService
                 while (_batch.Count < MaxBatchSize && _queue.Reader.TryRead(out var entry))
                     _batch[entry.Id] = entry;
 
+                long headerLength = 0;
+                while (_headerBatch.Count < MaxBatchSize && headerLength < MaxHeaderBatchLength &&
+                       _headerQueue.Reader.TryRead(out var headers))
+                {
+                    _headerBatch.Add(headers);
+                    headerLength += (headers.Request?.Length ?? 0) + (headers.Response?.Length ?? 0);
+                }
+
                 WriteBatch(database);
                 _batch.Clear();
+                _headerBatch.Clear();
 
                 PruneBySize(database);
             }
-            while (_queue.Reader.Count > 0);
+            while (_queue.Reader.Count > 0 || _headerQueue.Reader.Count > 0);
 
             if (DateTime.UtcNow >= _nextAgePrune)
                 PruneByAge(database);
@@ -278,6 +347,12 @@ internal sealed class TrafficStore : IHostedService
                 .Select(name => new SqliteParameter { ParameterName = "$" + name }).ToArray();
             _upsert.Parameters.AddRange(_upsertParameters);
             _upsert.Prepare();
+
+            _upsertHeaders = database.CreateCommand();
+            _upsertHeaders.CommandText = UpsertHeaders;
+            foreach (var name in new[] { "session", "id", "time", "request", "response" })
+                _upsertHeaders.Parameters.Add(new SqliteParameter { ParameterName = "$" + name });
+            _upsertHeaders.Prepare();
         }
         catch
         {
@@ -323,6 +398,8 @@ internal sealed class TrafficStore : IHostedService
     {
         _upsert?.Dispose();
         _upsert = null;
+        _upsertHeaders?.Dispose();
+        _upsertHeaders = null;
         _database?.Dispose();
         _database = null;
     }
@@ -330,9 +407,10 @@ internal sealed class TrafficStore : IHostedService
     private void WriteBatch(SqliteConnection database)
     {
         long drops = Interlocked.Read(ref _unrecordedDrops);
+        long headerDrops = Interlocked.Read(ref _unrecordedHeaderDrops);
         var whitelists = _newWhitelists.ToArray();
 
-        if (_batch.Count == 0 && drops == 0 && whitelists.Length == 0)
+        if (_batch.Count == 0 && _headerBatch.Count == 0 && drops == 0 && headerDrops == 0 && whitelists.Length == 0)
             return;
 
         using var transaction = database.BeginTransaction();
@@ -343,6 +421,19 @@ internal sealed class TrafficStore : IHostedService
         {
             SetParameters(entry);
             upsert.ExecuteNonQuery();
+        }
+
+        var upsertHeaders = _upsertHeaders!;
+        upsertHeaders.Transaction = transaction;
+        foreach (var headers in _headerBatch)
+        {
+            var parameters = upsertHeaders.Parameters;
+            parameters["$session"].Value = _session;
+            parameters["$id"].Value = headers.Id;
+            parameters["$time"].Value = headers.Time.ToUnixTimeMilliseconds();
+            parameters["$request"].Value = (object?)headers.Request ?? DBNull.Value;
+            parameters["$response"].Value = (object?)headers.Response ?? DBNull.Value;
+            upsertHeaders.ExecuteNonQuery();
         }
 
         foreach (var whitelist in whitelists)
@@ -356,20 +447,22 @@ internal sealed class TrafficStore : IHostedService
             command.ExecuteNonQuery();
         }
 
-        if (drops > 0)
+        if (drops > 0 || headerDrops > 0)
         {
             using var command = database.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = "INSERT INTO gaps VALUES($session, $time, $dropped)";
+            command.CommandText = "INSERT INTO gaps VALUES($session, $time, $dropped, $droppedHeaders)";
             command.Parameters.AddWithValue("$session", _session);
             command.Parameters.AddWithValue("$time", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             command.Parameters.AddWithValue("$dropped", drops);
+            command.Parameters.AddWithValue("$droppedHeaders", headerDrops);
             command.ExecuteNonQuery();
         }
 
         transaction.Commit();
 
         Interlocked.Add(ref _unrecordedDrops, -drops);
+        Interlocked.Add(ref _unrecordedHeaderDrops, -headerDrops);
         for (int i = 0; i < whitelists.Length; i++)
             _newWhitelists.TryDequeue(out _);
     }
@@ -415,7 +508,11 @@ internal sealed class TrafficStore : IHostedService
         if (command.ExecuteScalar() is not long cutoff)
             return;
 
-        command.CommandText = "DELETE FROM requests WHERE time_ms <= $cutoff";
+        // Going by the time also covers headers whose request was lost to an overflowing queue.
+        command.CommandText = """
+            DELETE FROM requests WHERE time_ms <= $cutoff;
+            DELETE FROM headers WHERE time_ms <= $cutoff;
+            """;
         command.Parameters.Clear();
         command.Parameters.AddWithValue("$cutoff", cutoff);
         command.ExecuteNonQuery();
@@ -426,6 +523,7 @@ internal sealed class TrafficStore : IHostedService
         using var command = database.CreateCommand();
         command.CommandText = """
             DELETE FROM requests WHERE time_ms < $cutoff;
+            DELETE FROM headers WHERE time_ms < $cutoff;
             DELETE FROM gaps WHERE time_ms < $cutoff;
             DELETE FROM sessions WHERE id < $cutoff AND id <> $session AND
                 id NOT IN (SELECT DISTINCT session FROM requests);

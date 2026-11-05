@@ -138,6 +138,133 @@ public sealed class TrafficRecordingTests(Harness h)
     }
 }
 
+/// <summary>What gets recorded of headers: most importantly, what does not.</summary>
+[Collection("charon")]
+public sealed class HeaderRecordingTests(Harness h)
+{
+    private static Dictionary<string, string> Parse(string json) =>
+        JsonDocument.Parse(json).RootElement.EnumerateArray()
+            .ToDictionary(p => p[0].GetString()!, p => p[1].GetString()!, StringComparer.OrdinalIgnoreCase);
+
+    private Task<string> FindAsync(string marker, string column) => h.WaitForTrafficAsync(
+        $"""
+        SELECT h.{column} FROM headers h JOIN requests r ON h.session = r.session AND h.id = r.id
+        WHERE r.url LIKE '%{marker}%' AND h.{column} IS NOT NULL
+        """, r => r.GetString(0));
+
+    private async Task SendAsync(string path, params (string Name, string Value)[] headers)
+    {
+        using var client = h.MakeClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://localhost:{h.HttpsPort}{path}");
+        foreach (var (name, value) in headers)
+            request.Headers.TryAddWithoutValidation(name, value);
+        await client.SendAsync(request);
+    }
+
+    private void AssertNotInDatabaseFiles(string secret)
+    {
+        foreach (var file in Directory.GetFiles(Path.GetDirectoryName(h.TrafficDatabaseFile)!))
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            Assert.DoesNotContain(secret, Encoding.Latin1.GetString(buffer.ToArray()));
+        }
+    }
+
+    [Fact]
+    public async Task RequestAndResponseHeadersAreRecorded()
+    {
+        var marker = Guid.NewGuid().ToString();
+        await SendAsync($"/allowed/{marker}", ("X-Custom", "client-value"));
+
+        Assert.Equal("client-value", Parse(await FindAsync(marker, "request"))["X-Custom"]);
+        Assert.Contains("application/json", Parse(await FindAsync(marker, "response"))["Content-Type"]);
+    }
+
+    [Fact]
+    public async Task HeadersOfDeniedRequestsAreRecorded()
+    {
+        var marker = Guid.NewGuid().ToString();
+        await SendAsync($"/denied/{marker}", ("X-HTTP-Method-Override", "DELETE"));
+        Assert.Equal("DELETE", Parse(await FindAsync(marker, "request"))["X-HTTP-Method-Override"]);
+    }
+
+    [Theory]
+    [InlineData("Authorization")]
+    [InlineData("Cookie")]
+    [InlineData("X-Api-Key")]
+    public async Task UsualHeadersForSecretsAreRedacted(string name)
+    {
+        var marker = Guid.NewGuid().ToString();
+        var secret = Guid.NewGuid().ToString();
+        await SendAsync($"/allowed/{marker}", (name, secret));
+
+        Assert.Equal("[redacted]", Parse(await FindAsync(marker, "request"))[name]);
+        AssertNotInDatabaseFiles(secret);
+    }
+
+    [Fact]
+    public async Task InjectedCredentialIsNotRecorded()
+    {
+        var marker = Guid.NewGuid().ToString();
+        await SendAsync($"/api/bearer/{marker}", ("Authorization", "Bearer dummy"));
+        await FindAsync(marker, "response");
+        AssertNotInDatabaseFiles(Harness.StaticToken);
+    }
+
+    [Fact]
+    public async Task CredentialRepeatedInResponseHeadersIsScrubbed()
+    {
+        await SendAsync("/api/bearer/echo?scrub-bearer");
+        var headers = Parse(await FindAsync("scrub-bearer", "response"));
+
+        Assert.Equal("[redacted]", headers["X-Echo"]);
+        Assert.Equal("[redacted]", headers["X-Echo-Token"]);
+        Assert.Equal("[redacted]", headers["Set-Cookie"]);
+        Assert.Equal("kept", headers["X-Innocent"]);
+        AssertNotInDatabaseFiles(Harness.StaticToken);
+    }
+
+    [Fact]
+    public async Task EncodedCredentialInResponseHeadersIsScrubbed()
+    {
+        await SendAsync("/api/basic/echo?scrub-basic");
+        Assert.Equal("[redacted]", Parse(await FindAsync("scrub-basic", "response"))["X-Echo-Token"]);
+    }
+
+    [Fact]
+    public async Task OversizedHeadersAreTruncated()
+    {
+        var marker = Guid.NewGuid().ToString();
+        await SendAsync($"/allowed/{marker}", ("X-Small", "1"), ("X-Huge", new string('h', 100_000)));
+
+        var json = await FindAsync(marker, "request");
+        Assert.True(json.Length < 20_000, $"Length is {json.Length}");
+        Assert.Contains("(truncated)", json);
+    }
+
+    [Fact]
+    public async Task HeadersAreOffUnlessAskedFor()
+    {
+        var other = new Harness { RecordHeaders = false };
+        await other.InitializeAsync();
+        try
+        {
+            var marker = Guid.NewGuid().ToString();
+            using var client = other.MakeClient();
+            await client.GetAsync($"https://localhost:{other.HttpsPort}/allowed/{marker}");
+
+            await other.WaitForTrafficAsync($"SELECT 1 FROM requests WHERE url LIKE '%{marker}%' AND status IS NOT NULL", r => r.GetInt64(0));
+            Assert.Equal(0, await other.WaitForTrafficAsync("SELECT count(*) FROM headers", r => r.GetInt64(0)));
+        }
+        finally
+        {
+            await other.DisposeAsync();
+        }
+    }
+}
+
 /// <summary>The behaviour of the store itself, including when things go wrong.</summary>
 public sealed class TrafficStoreTests : IDisposable
 {
@@ -324,6 +451,67 @@ public sealed class TrafficStoreTests : IDisposable
         Assert.True(new FileInfo(DatabasePath).Length < limit * 2, $"File is {new FileInfo(DatabasePath).Length} bytes");
         Assert.True(Scalar("SELECT count(*) FROM requests") is > 0 and < count);
         Assert.Equal(count, Scalar("SELECT max(id) FROM requests"));
+    }
+
+    [Fact]
+    public async Task HeadersAreRemovedWithTheirRequests()
+    {
+        const long limit = 4 * 1024 * 1024;
+        var log = new TrafficLog(10);
+        var store = new TrafficStore(Options(maxBytes: limit), log, _whitelist);
+        await store.StartAsync(default);
+
+        for (int i = 0; i < 20_000; i++)
+        {
+            var entry = log.Add("client", "GET", $"https://x.test/{i}", allowed: true);
+            store.AddHeaders(entry, $"[[\"X-Padding\",\"{new string('p', 500)}\"]]", null);
+            if (i % 1024 == 0)
+                await Task.Delay(20);
+        }
+        await store.StopAsync(default);
+
+        Assert.Equal(0, Scalar("""
+            SELECT count(*) FROM headers h WHERE NOT EXISTS
+                (SELECT 1 FROM requests r WHERE r.session = h.session AND r.id = h.id)
+            """));
+        Assert.True(Scalar("SELECT count(*) FROM headers") > 0);
+        Assert.True(new FileInfo(DatabasePath).Length < limit * 2, $"File is {new FileInfo(DatabasePath).Length} bytes");
+    }
+
+    [Fact]
+    public async Task OldHeadersWithoutARequestAreRemoved()
+    {
+        var log = new TrafficLog(10);
+        var store = new TrafficStore(Options(retention: TimeSpan.FromMilliseconds(200)), log, _whitelist);
+        await store.StartAsync(default);
+        store.AddHeaders(new TrafficEntry(1, DateTimeOffset.UtcNow, "c", "GET", "u", true), "[]", null);
+        await store.StopAsync(default);
+        Assert.Equal(1, Scalar("SELECT count(*) FROM headers"));
+
+        await Task.Delay(300);
+
+        var later = new TrafficStore(Options(retention: TimeSpan.FromMilliseconds(200)), new TrafficLog(10), _whitelist);
+        await later.StartAsync(default);
+        await later.StopAsync(default);
+        Assert.Equal(0, Scalar("SELECT count(*) FROM headers"));
+    }
+
+    [Fact]
+    public async Task OverflowOfHeadersKeepsTheRequestsAndIsRecorded()
+    {
+        var log = new TrafficLog(10);
+        var store = new TrafficStore(Options(), log, _whitelist, headerQueueCapacity: 10);
+
+        for (int i = 0; i < 25; i++)
+            store.AddHeaders(log.Add("client", "GET", $"https://x.test/{i}", allowed: true), "[]", null);
+        Assert.Equal(15, store.Status.DroppedHeaders);
+
+        await store.StartAsync(default);
+        await store.StopAsync(default);
+
+        Assert.Equal(25, Scalar("SELECT count(*) FROM requests"));
+        Assert.Equal(10, Scalar("SELECT count(*) FROM headers"));
+        Assert.Equal(15, Scalar("SELECT sum(dropped_headers) FROM gaps"));
     }
 
     [Fact]
