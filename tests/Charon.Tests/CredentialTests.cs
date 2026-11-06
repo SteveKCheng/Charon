@@ -200,6 +200,37 @@ public sealed class CredentialConfigTests
         ]
         """));
 
+    [Fact]
+    public async Task OmittedSettingsGetTheirDefaults()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, "secret");
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+            var json = $$"""[{ "name": "a", "origin": "https://x.test", "url": ".", "tokenFile": "{{path}}" }]""";
+            var credential = CredentialStore.Parse(json, Client, out _)["https://x.test"].Single();
+
+            Assert.Equal("Authorization", credential.Header);
+            Assert.Equal("Bearer secret", (await credential.GetValueAsync(default)).HeaderValue);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void OmittedApiBaseGetsItsDefault()
+    {
+        var config = JsonSerializer.Deserialize(
+            """[{ "name": "a", "origin": "https://x.test", "url": ".", "gitHubApp": { "appId": "1", "installationId": 2, "privateKeyFile": "/k" } }]""",
+            CredentialStoreJsonContext.Default.CredentialConfigArray)!;
+
+        Assert.Equal("https://api.github.com", config[0].GitHubApp!.ApiBase);
+    }
+
     [Theory]
     [InlineData("http://example.com")]
     [InlineData("example.com")]
