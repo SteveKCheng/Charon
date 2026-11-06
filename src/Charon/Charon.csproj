@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Charon</RootNamespace>
     <TargetName>charon</TargetName>
+    <PublishAot>true</PublishAot>
+    <PublishSingleFile>true</PublishSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
