@@ -126,7 +126,7 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
             $"{config.ApiBase.TrimEnd('/')}/app/installations/{config.InstallationId}/access_tokens");
-        request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + MakeJsonWebToken());
+        request.Headers.TryAddWithoutValidation("Authorization", MakeJsonWebToken());
         request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
         request.Headers.TryAddWithoutValidation("User-Agent", "Charon");
         request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
@@ -158,35 +158,61 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
         using var key = RSA.Create();
         key.ImportFromPem(pem);
 
-        using var jsonStream = new MemoryStream(capacity: 96);
-        using var jsonWriter = new Utf8JsonWriter(jsonStream);
-
-        jsonWriter.WriteStartObject();
-        jsonWriter.WriteString("alg", "RS256");
-        jsonWriter.WriteString("typ", "JWT");
-        jsonWriter.WriteEndObject();
-        jsonWriter.Flush();
-        var headerBase64 = Base64Url.EncodeToString(jsonStream.GetBuffer()[0..(int)jsonStream.Length]);
-
-        jsonWriter.Reset();
-        jsonStream.SetLength(0);
-            
         // Backdated in case of clock drift.  GitHub allows at most 10 minutes of validity.
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        
-        jsonWriter.WriteStartObject();
-        jsonWriter.WriteNumber("iat", now - 60);
-        jsonWriter.WriteNumber("exp", now + 540);
-        jsonWriter.WriteString("iss", config.AppId);
-        jsonWriter.WriteEndObject();
-        jsonWriter.Flush();
-        var payloadBase64 = Base64Url.EncodeToString(jsonStream.GetBuffer()[0..(int)jsonStream.Length]); 
-        
-        var signedPart = headerBase64 + "." + payloadBase64; 
-        var signature = key.SignData(Encoding.ASCII.GetBytes(signedPart),
-                                     HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
-        return signedPart + "." + Base64Url.EncodeToString(signature);
+        Span<byte> outBuffer = stackalloc byte[512];  // Buffer for composing the final output
+        byte[] tempBuffer = new byte[256];            // Buffer for intermediate outputs
+        int outPos;                                   // Current writing position on outBuffer
+
+        // Write prefix first, into outBuffer
+        var prefix = "Bearer "u8;
+        prefix.CopyTo(outBuffer);
+        outPos = prefix.Length;
+        
+        static int ToBase64Url(ReadOnlySpan<byte> source, Span<byte> destination)
+            => Base64Url.TryEncodeToUtf8(source, destination, out int bytesWritten)
+                ? bytesWritten
+                : throw new System.ArgumentException("Internal buffer for UTF-8 encoding is too short. This is a bug in Charon. "); 
+        
+        using (var jsonStream = new MemoryStream(tempBuffer))
+        using (var jsonWriter = new Utf8JsonWriter(jsonStream))
+        {
+            // Write Base64Url(Header)
+            jsonStream.SetLength(0);
+            jsonWriter.WriteStartObject();
+            jsonWriter.WriteString("alg"u8, "RS256"u8);
+            jsonWriter.WriteString("typ"u8, "JWT"u8);
+            jsonWriter.WriteEndObject();
+            jsonWriter.Flush();
+            outPos += ToBase64Url(tempBuffer[..(int)jsonStream.Length], outBuffer[outPos..]);
+    
+            // Write separator between Base64Url(Header) and Base64Url(Payload)
+            outBuffer[outPos++] = (byte)'.';
+    
+            jsonWriter.Reset();
+
+            // Write Base64Url(Payload)
+            jsonStream.SetLength(0);
+            jsonWriter.WriteStartObject();
+            jsonWriter.WriteNumber("iat"u8, now - 60);
+            jsonWriter.WriteNumber("exp"u8, now + 540);
+            jsonWriter.WriteString("iss"u8, config.AppId);
+            jsonWriter.WriteEndObject();
+            jsonWriter.Flush();
+            outPos += ToBase64Url(tempBuffer[..(int)jsonStream.Length], outBuffer[outPos..]);
+        }
+
+        // Form Signature(Base64Url(Header) + '.' + Base64Url(Payload))
+        var signedPart = outBuffer[prefix.Length..outPos];
+        int signatureLength = key.SignData(signedPart, tempBuffer,
+                                           HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        // Append '.', then Base64Url(Signature(…)), to the output buffer
+        outBuffer[outPos++] = (byte)'.';
+        outPos += ToBase64Url(tempBuffer[..signatureLength], outBuffer[outPos..]);
+
+        var outString = Encoding.ASCII.GetString(outBuffer[..outPos]);
+        return outString;
     }
-
 }
