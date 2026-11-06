@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -10,6 +11,14 @@ namespace Charon;
 /// <summary>Assembles the proxy and its Web UI, which share a process but not a port.</summary>
 public static class CharonApp
 {
+    /// <summary>
+    /// The version of this build, to tell it apart from others.  Uncommitted changes are
+    /// noted since otherwise, the version would be that of the commit they are based on.
+    /// </summary>
+    internal static string Version { get; } =
+        $"{GitVersionInformation.SemVer}+{GitVersionInformation.ShortSha}" +
+        (GitVersionInformation.UncommittedChanges == "0" ? "" : ".modified");
+
     public static WebApplication Build(WebApplicationBuilder builder, CharonOptions options)
     {
         var ca = CertificateAuthority.LoadOrCreate(options.CaCertificateFile, options.CaKeyFile);
@@ -90,6 +99,7 @@ public static class CharonApp
         app.MapGet("/api/status", (IServiceProvider services) =>
             Results.Json(new StatusMessage()
                 {
+                    Version = Version,
                     TrafficDatabase = services.GetService<TrafficStore>()?.Status
                 },
                 CharonAppJsonContext.Default.StatusMessage));
@@ -102,11 +112,13 @@ public static class CharonApp
 
     internal sealed class StatusMessage
     {
+        public required string Version { get; set; }
+
         public TrafficStoreStatus? TrafficDatabase { get; set; }
     }
 }
 
-[JsonSourceGenerationOptions]
+[JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
 [JsonSerializable(typeof(CharonApp.StatusMessage))]
 [JsonSerializable(typeof(TrafficEntry))]
 internal partial class CharonAppJsonContext : JsonSerializerContext

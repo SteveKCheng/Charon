@@ -1,5 +1,9 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <ArtifactsPath>$(MSBuildThisFileDirectory)out</ArtifactsPath>
+
+    <!-- GitVersion's cache goes by commit, so it would miss changes to the working tree.
+         This has to be here, for GitVersion's own properties to see it. -->
+    <GitVersion_NoCacheEnabled>true</GitVersion_NoCacheEnabled>
   </PropertyGroup>
 </Project>

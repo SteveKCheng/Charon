@@ -10,6 +10,7 @@
   header { position: sticky; top: 0; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
            padding: 8px 16px; background: Canvas; border-bottom: 1px solid var(--line); }
   h1 { font-size: 16px; margin: 0; }
+  #version { font-size: 12px; font-weight: normal; opacity: 0.7; }
   #filter { flex: 1; min-width: 160px; padding: 4px 8px; }
   table { width: 100%; border-collapse: collapse; table-layout: fixed; }
   th, td { padding: 3px 8px; border-bottom: 1px solid var(--line); text-align: left;
@@ -24,7 +25,7 @@
 </head>
 <body>
 <header>
-  <h1>Charon</h1>
+  <h1>Charon <span id="version"></span></h1>
   <input id="filter" type="search" placeholder="Filter URLs" aria-label="Filter URLs">
   <label><input id="deniedOnly" type="checkbox"> Denied only</label>
   <span id="problem" role="alert"></span>
@@ -89,10 +90,13 @@ events.onopen = () => { status.textContent = "Live"; };
 events.onerror = () => { status.textContent = "Disconnected: retrying…"; };
 events.onmessage = m => onEntry(JSON.parse(m.data));
 
-// Requests going unrecorded should not pass unnoticed.
+// Requests going unrecorded should not pass unnoticed.  The version is here so
+// that a page left open shows what is running now, and not what was when it was loaded.
 async function checkStatus() {
   try {
-    const database = (await (await fetch("/api/status")).json()).trafficDatabase;
+    const { version, trafficDatabase: database } = await (await fetch("/api/status")).json();
+    document.getElementById("version").textContent = version;
+    document.title = "Charon " + version;
     const problems = [];
     if (database && !database.healthy) problems.push("Traffic database: " + database.error);
     if (database && database.droppedEvents > 0) problems.push(database.droppedEvents + " events not recorded");

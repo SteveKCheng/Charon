@@ -131,8 +131,11 @@ public sealed class TrafficRecordingTests(Harness h)
     public async Task WebUiReportsTheStateOfTheDatabase()
     {
         using var ui = new HttpClient(new SocketsHttpHandler { UseProxy = false });
-        var status = JsonDocument.Parse(await ui.GetStringAsync($"http://127.0.0.1:{h.UiPort}/api/status"))
-                                 .RootElement.GetProperty("trafficDatabase");
+        var root = JsonDocument.Parse(await ui.GetStringAsync($"http://127.0.0.1:{h.UiPort}/api/status")).RootElement;
+        Assert.Equal(CharonApp.Version, root.GetProperty("version").GetString());
+        Assert.Matches(@"^\d+\.\d+\.\d+.*\+[0-9a-f]{7,}(\.modified)?$", CharonApp.Version);
+
+        var status = root.GetProperty("trafficDatabase");
         Assert.True(status.GetProperty("healthy").GetBoolean());
         Assert.Equal(0, status.GetProperty("droppedEvents").GetInt64());
     }

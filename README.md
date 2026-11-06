@@ -212,6 +212,13 @@ limit.  Under very heavy load they are dropped before anything else, which `gaps
   - Tunnels only carry HTTP in TLS.  Anything else, such as SSH over `CONNECT`, is dropped.
   - `GET` rules do not grant bodies or WebSockets, and some requests are always refused, as above.
 
+## Versions
+
+Versions come from Git history, through [GitVersion](https://gitversion.net/).  Building
+needs a Git repository: exported source trees fail, and a shallow clone gets the wrong version.
+The Web UI shows the version running, such as `0.0.1-18+fe963fe`, which ends with the commit.
+It has `.modified` after that if the working tree had uncommitted changes when it was built.
+
 ## Testing
 
 ```
