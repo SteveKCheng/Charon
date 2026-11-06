@@ -14,6 +14,10 @@ internal interface ITokenSource
 {
     /// <exception cref="CredentialUnavailableException">The token cannot be had.</exception>
     ValueTask<string> GetTokenAsync(CancellationToken cancellationToken);
+
+    /// <summary>Gets the source for the tokens of a user, which can have a different scope.</summary>
+    /// <exception cref="CredentialUnavailableException">Tokens of this source have no scope to set.</exception>
+    ITokenSource ForGrant(CredentialGrant grant);
 }
 
 /// <summary>What goes in the header of a request for a credential.</summary>
@@ -73,10 +77,13 @@ internal sealed class Credential(CredentialConfig config, Regex url, ITokenSourc
     public bool Matches(string destinationUrl) => url.IsMatch(destinationUrl);
 
     /// <summary>Gets the value to set the header to.</summary>
+    /// <param name="cancellationToken">For giving up.</param>
+    /// <param name="grant">What a user gets of this credential, or null for the credential as it is.</param>
     /// <exception cref="CredentialUnavailableException">The token cannot be had.</exception>
-    public async ValueTask<CredentialValue> GetValueAsync(CancellationToken cancellationToken)
+    public async ValueTask<CredentialValue> GetValueAsync(CancellationToken cancellationToken,
+                                                          CredentialGrant? grant = null)
     {
-        var token = await source.GetTokenAsync(cancellationToken);
+        var token = await (grant is null ? source : source.ForGrant(grant)).GetTokenAsync(cancellationToken);
 
         if (token.Length == 0 || token.Any(char.IsControl))
             throw new CredentialUnavailableException("The token is empty or has control characters.");
@@ -130,6 +137,9 @@ internal sealed class CredentialStore : IDisposable
         _byOrigin = Parse(File.ReadAllText(path), _client, out int count);
         _logger?.LogInformation("Loaded {Count} credentials from {Path}", count, path);
     }
+
+    /// <summary>Whether there is a credential of some name.</summary>
+    public bool Contains(string name) => _byOrigin.Values.Any(list => list.Any(c => c.Name == name));
 
     /// <summary>Finds the first credential, in the order of the file, for a URL.</summary>
     /// <param name="destination">Where the request is actually going.</param>
@@ -264,5 +274,14 @@ internal sealed class FileTokenSource(string path) : ITokenSource
         {
             throw new CredentialUnavailableException(e.Message, e);
         }
+    }
+
+    public ITokenSource ForGrant(CredentialGrant grant)
+    {
+        // Silently handing out the token would give more than what was written.
+        if (grant.HasPermissions || grant.HasRepositories)
+            throw new CredentialUnavailableException("A token from a file cannot be limited by a user's settings.");
+
+        return this;
     }
 }

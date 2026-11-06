@@ -39,7 +39,7 @@ public sealed class ForwardingTests(Harness h)
         var response = await Harness.ExchangeAsync(stream,
             $"GET http://localhost:{h.HttpPort}/allowed/headers HTTP/1.1\r\n" +
             $"Host: localhost:{h.HttpPort}\r\nProxy-Connection: keep-alive\r\n" +
-            "Proxy-Authorization: Basic c2VjcmV0\r\nConnection: close\r\n\r\n");
+            $"Proxy-Authorization: {Harness.BasicAuthorization("alice", "alice-pw")}\r\nConnection: close\r\n\r\n");
 
         var headers = response[response.IndexOf('{')..];
         Assert.DoesNotContain("Proxy-", headers);

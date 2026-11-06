@@ -582,6 +582,44 @@ public sealed class TrafficStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task DatabaseOfThePreviousVersionIsMigrated()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        using (var database = new SqliteConnection($"Data Source={DatabasePath};Pooling=False"))
+        {
+            database.Open();
+            using var command = database.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE requests(
+                    session INTEGER NOT NULL, id INTEGER NOT NULL, time_ms INTEGER NOT NULL, client TEXT NOT NULL,
+                    method TEXT NOT NULL, url TEXT NOT NULL, allowed INTEGER NOT NULL, status INTEGER,
+                    duration_ms REAL, reason TEXT, note TEXT, rule_line INTEGER, rule TEXT, whitelist TEXT,
+                    PRIMARY KEY(session, id)) WITHOUT ROWID;
+                CREATE VIEW traffic AS SELECT method, url FROM requests;
+                PRAGMA user_version = 1;
+                """;
+            command.ExecuteNonQuery();
+            command.CommandText = $"INSERT INTO requests VALUES(1, 1, {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}, " +
+                                  "'c', 'GET', 'https://old.test/', 1, 200, 1, NULL, NULL, NULL, NULL, NULL)";
+            command.ExecuteNonQuery();
+        }
+        File.SetUnixFileMode(DatabasePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        var log = new TrafficLog(10);
+        var store = new TrafficStore(Options(), log, _whitelist);
+        await store.StartAsync(default);
+        log.Add("client", "GET", "https://new.test/", allowed: true, user: "alice");
+        await store.StopAsync(default);
+
+        Assert.True(store.Status.Healthy, store.Status.Error);
+        Assert.Equal(2, Scalar("PRAGMA user_version"));
+        Assert.Equal(2, Scalar("SELECT count(*) FROM requests"));
+        Assert.Equal(1, Scalar("SELECT count(*) FROM requests WHERE user = 'alice' AND url = 'https://new.test/'"));
+        Assert.Equal(1, Scalar("SELECT count(*) FROM traffic WHERE user = 'alice'"));
+        Assert.Equal(1, Scalar("SELECT count(*) FROM requests WHERE user IS NULL AND url = 'https://old.test/'"));
+    }
+
+    [Fact]
     public async Task DatabaseFromTheFutureIsLeftAlone()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);

@@ -24,6 +24,19 @@ public sealed class CharonOptions
     /// </summary>
     public string CredentialsFile { get; set; } = Path.Combine(ConfigDirectory, "credentials.json");
 
+    /// <summary>
+    /// JSON file of the users of the proxy, for giving them narrower credentials.
+    /// It should not be accessible from sandboxes, and must be private to its owner.
+    /// </summary>
+    public string ProxyUsersFile { get; set; } = Path.Combine(ConfigDirectory, "users.json");
+
+    /// <summary>
+    /// Whether clients must identify themselves as a user.  If not, those that do not get
+    /// the credentials as they are in the credentials file.  Clients that
+    /// wait to be asked for their password then never send it, like git by default.
+    /// </summary>
+    public bool RequireProxyAuthentication { get; set; }
+
     /// <summary>PEM certificate of the interception CA; generated if it does not exist.</summary>
     public string CaCertificateFile { get; set; } = Path.Combine(ConfigDirectory, "ca.crt");
 

@@ -10,9 +10,17 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 namespace Charon;
 
 /// <summary>The target of a CONNECT request, which all requests inside the tunnel must go to.</summary>
-internal sealed class Tunnel(Authority target)
+/// <param name="target">Where the tunnel goes.</param>
+/// <param name="userName">Who it is for, or null for an anonymous client.</param>
+internal sealed class Tunnel(Authority target, string? userName)
 {
     public Authority Target { get; } = target;
+
+    /// <summary>
+    /// The user, as identified by the CONNECT request.  Nothing inside the tunnel can change
+    /// this.  It is a name so that changes to the user apply to tunnels that are open.
+    /// </summary>
+    public string? UserName { get; } = userName;
 
     public int RequestCount;
 }
@@ -52,12 +60,21 @@ internal static class ProxyListener
     private static readonly ReadOnlyMemory<byte> BadRequest =
         "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray();
 
-    public static void Configure(ListenOptions listenOptions, CertificateAuthority ca, TrafficLog log)
+    /// <summary>The value of the Proxy-Authenticate header, for asking for credentials.</summary>
+    public const string ProxyAuthenticateChallenge = "Basic realm=\"Charon\"";
+
+    private static readonly ReadOnlyMemory<byte> ProxyAuthenticationRequired = Encoding.ASCII.GetBytes(
+        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+        $"Proxy-Authenticate: {ProxyAuthenticateChallenge}\r\n" +
+        "Content-Length: 0\r\nConnection: close\r\n\r\n");
+
+    public static void Configure(ListenOptions listenOptions, CertificateAuthority ca, TrafficLog log,
+                                 IClientAuthenticator authenticator)
     {
         ConnectionDelegate? httpPipeline = null;
 
         listenOptions.Use(tlsPipeline => connection =>
-            HandleConnectionAsync(connection, tlsPipeline, httpPipeline!, log));
+            HandleConnectionAsync(connection, tlsPipeline, httpPipeline!, log, authenticator));
 
         listenOptions.UseHttps(new TlsHandshakeCallbackOptions
         {
@@ -88,13 +105,34 @@ internal static class ProxyListener
         return (Tunnel?)tunnel;
     }
 
+    /// <summary>Gets how the listener of a connection identifies clients.</summary>
+    public static IClientAuthenticator GetAuthenticator(IFeatureCollection features) =>
+        (IClientAuthenticator)features.Get<IConnectionItemsFeature>()!.Items[typeof(IClientAuthenticator)]!;
+
+    /// <summary>Gets a header from the head of a request, as text.</summary>
+    private static string? FindHeader(string head, string name)
+    {
+        foreach (var line in head.Split("\r\n"))
+        {
+            if (line.StartsWith(name, StringComparison.OrdinalIgnoreCase) &&
+                line.Length > name.Length && line[name.Length] == ':')
+            {
+                return line[(name.Length + 1)..].Trim();
+            }
+        }
+
+        return null;
+    }
+
     private static async Task HandleConnectionAsync(ConnectionContext connection,
                                                     ConnectionDelegate tlsPipeline,
                                                     ConnectionDelegate httpPipeline,
-                                                    TrafficLog log)
+                                                    TrafficLog log,
+                                                    IClientAuthenticator authenticator)
     {
         // Set on all connections, as this is how requests get told apart from the Web UI's.
         connection.Items[typeof(ProxyListener)] = true;
+        connection.Items[typeof(IClientAuthenticator)] = authenticator;
 
         string? head;
         try
@@ -126,7 +164,22 @@ internal static class ProxyListener
             return;
         }
 
-        var tunnel = new Tunnel(authority);
+        var proxyAuthorization = FindHeader(head, "Proxy-Authorization");
+        if (!authenticator.TryAuthenticate(proxyAuthorization, out var userName))
+        {
+            // Being asked for a password is a normal step for many clients, unlike getting it wrong.
+            if (proxyAuthorization is not null)
+            {
+                log.Add(connection.RemoteEndPoint?.ToString() ?? "?", "CONNECT",
+                        $"{authority.UrlHost}:{authority.Port}", allowed: false,
+                        status: StatusCodes.Status407ProxyAuthenticationRequired, reason: "wrong proxy credentials");
+            }
+
+            await connection.Transport.Output.WriteAsync(ProxyAuthenticationRequired);
+            return;
+        }
+
+        var tunnel = new Tunnel(authority, userName);
         connection.Items[typeof(Tunnel)] = tunnel;
         await connection.Transport.Output.WriteAsync(Established);
 
@@ -138,7 +191,7 @@ internal static class ProxyListener
         {
             log.Add(connection.RemoteEndPoint?.ToString() ?? "?", "CONNECT",
                     $"{authority.UrlHost}:{authority.Port}", allowed: false,
-                    note: "No HTTP request was received in the tunnel", reason: "no HTTP in tunnel");
+                    note: "No HTTP request was received in the tunnel", reason: "no HTTP in tunnel", user: userName);
         }
     }
 

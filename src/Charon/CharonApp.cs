@@ -40,7 +40,7 @@ public static class CharonApp
             kestrel.Listen(address, options.ProxyPort, listen =>
             {
                 listen.Protocols = HttpProtocols.Http1AndHttp2;
-                ProxyListener.Configure(listen, ca, log);
+                ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
             });
 
             kestrel.Listen(address, options.UiPort);
@@ -59,6 +59,9 @@ public static class CharonApp
         builder.Services.AddSingleton(services => new CredentialStore(
             options.CredentialsFile, services.GetRequiredService<HttpMessageInvoker>(),
             services.GetRequiredService<ILoggerFactory>().CreateLogger<CredentialStore>()));
+        builder.Services.AddSingleton(services => new ProxyUserStore(
+            options.ProxyUsersFile, options.RequireProxyAuthentication, services.GetRequiredService<CredentialStore>(),
+            services.GetRequiredService<ILoggerFactory>().CreateLogger<ProxyUserStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.TypeInfoResolverChain.Insert(0, CharonAppJsonContext.Default));

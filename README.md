@@ -122,6 +122,65 @@ An agent can do anything with a credential that the rules allow, so make them na
 In particular, a URL covered by a credential must not echo request headers back, or the
 agent gets to read the secret.
 
+## Proxy users
+
+Agents can be given narrower credentials than the defaults, by being users of the proxy.  They
+are listed in `~/.config/charon/users.json`, which is reloaded when it changes, and is ignored
+if other users of the computer can access it.  Keep it out of sandboxes.
+
+```jsonc
+[
+  {
+    "name": "agent-charon",
+    "password": "some long random text",   // Or "passwordSha256": "…" in hexadecimal
+    "credentials": {
+      "charon-api": { "repositories": [ "Charon" ], "permissions": { "actions": "write" } },
+      "charon-git": { "repositories": [ "Charon" ] }
+    }
+  }
+]
+```
+
+An agent identifies itself through the URL of the proxy, in the variables `http_proxy` and
+`HTTPS_PROXY`, as `http://agent-charon:password@localhost:8080/`.
+
+  - Users are an added layer of safety to opt into.  A user's list says how credentials differ for
+    it, by their name in `credentials.json`.  **Credentials not listed apply as they do for
+    anyone.**  To keep a user from a credential, give it an empty scope, as described below.
+    A misspelt name therefore does not narrow anything, though it gets a warning in the log.
+  - Credentials are still applied only to the URLs given in `credentials.json`.  So those
+    URLs, and the whitelist, have to cover all the repositories of all the users.
+  - Clients that do not identify themselves get the credentials as they are in `credentials.json`,
+    unless `RequireProxyAuthentication` is set to true, which has them refused.
+  - A wrong user name or password is always refused.  It does not count as not identifying oneself.
+  - This limits the damage from agents making mistakes.  It does not protect agents from each other:
+    an agent knows its own password, which could end up in its transcript, for example.
+
+**git and .NET programs do not send the password until asked for it**, and without
+`RequireProxyAuthentication` they never are.  So they would quietly get the defaults.  For git,
+set the environment variable `GIT_HTTP_PROXY_AUTHMETHOD=basic` in the sandbox, or else use
+`RequireProxyAuthentication`.  Other programs tested (`curl`, Python, Node.js and Claude Code) send it
+regardless.  The column `user` of the traffic database and the Web UI show who a request was from.
+
+### Scopes of tokens
+
+For a GitHub App, `permissions` and `repositories` set what tokens can do, both in `credentials.json`
+and for each user.  They only ever narrow what the installation of the App has.  The value
+matters, and the difference between these is easy to miss:
+
+| Value | Meaning |
+|---|---|
+| A list, or an object for `permissions` | Just these |
+| `null` | No restriction: all that the installation of the App has |
+| Empty: `[]` or `{}` | Nothing: no token is issued, and requests fail with status 502 |
+| Left out, for a user | Whatever `credentials.json` says.  Leaving it out there is the same as `null` |
+
+The values for a user replace those in `credentials.json`.  They are not combined.  So a user's
+list can have more than the one in `credentials.json`, up to what the installation has.
+
+Credentials that come from a `tokenFile` cannot be narrowed.  Giving a user any of these settings
+for one means that it cannot use the credential: requests then fail with status 502.
+
 ## Traffic database
 
 All requests are recorded in an SQLite database, which outlasts restarts of the proxy.  It is at
@@ -153,6 +212,7 @@ SELECT contents FROM whitelists WHERE hash =
 | `credential unavailable` | The credential named in `note` could not be obtained |
 | `CONNECT not first` | `CONNECT` is only understood at the start of a connection |
 | `no HTTP in tunnel` | The client never got to make a request: maybe it pins certificates, or is not speaking HTTP |
+| `wrong proxy credentials` | The user name or password of the proxy is not right |
 
 A request without a `status` never finished, because the proxy stopped while it was in progress.
 

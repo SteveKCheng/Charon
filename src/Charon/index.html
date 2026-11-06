@@ -51,7 +51,7 @@ function matches(e) {
 
 function render(tr, e) {
   const cells = [new Date(e.time).toLocaleTimeString(), e.method, e.status ?? "", e.url,
-                 e.durationMs == null ? "" : Math.round(e.durationMs), e.note ?? e.reason ?? "", e.client];
+                 e.durationMs == null ? "" : Math.round(e.durationMs), e.note ?? e.reason ?? "", e.user ?? e.client];
   tr.replaceChildren(...cells.map((text, i) => {
     const td = document.createElement("td");
     td.textContent = text;

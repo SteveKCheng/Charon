@@ -1,4 +1,5 @@
 using System.Buffers.Text;
+using System.Collections.Concurrent;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -25,12 +26,16 @@ internal sealed record GitHubAppConfig
     public const string ApiBaseDefault = "https://api.github.com";
 
     /// <summary>
-    /// If set, tokens get only these of the App's permissions: for example
-    /// <c>{"actions": "write"}</c>.  Otherwise, tokens get all of them.
+    /// The App's permissions that tokens get: for example <c>{"actions": "write"}</c>.
+    /// If null, they get all of them.  This only ever contracts, so if it is
+    /// empty, tokens could do nothing, and none are issued.
     /// </summary>
     public Dictionary<string, string>? Permissions { get; init; }
 
-    /// <summary>If set, tokens only work on these repositories of the installation.</summary>
+    /// <summary>
+    /// The repositories of the installation that tokens work on.  If null they work on all of
+    /// them.  As for <see cref="Permissions"/>, none are issued if this is empty.
+    /// </summary>
     public string[]? Repositories { get; init; }
 }
 
@@ -71,6 +76,12 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
     
     private readonly SemaphoreSlim _lock = new(1);
 
+    /// <summary>
+    /// Sources for the scopes of users.  Users with the same scope share tokens, and
+    /// each scope has its own failures, so that one user's mistake leaves the others working.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, GitHubAppTokenSource> _scoped = new();
+
     private volatile TokenResponse? _current;
     private DateTimeOffset _retryTime;
     private string? _failure;
@@ -78,8 +89,33 @@ internal sealed class GitHubAppTokenSource(GitHubAppConfig config, HttpMessageIn
     private static bool IsFresh(TokenResponse? token) =>
         token is not null && token.ExpiresAt - DateTimeOffset.UtcNow > RenewalMargin;
 
+    public ITokenSource ForGrant(CredentialGrant grant)
+    {
+        var scoped = config with
+        {
+            Permissions = grant.HasPermissions ? grant.Permissions : config.Permissions,
+            Repositories = grant.HasRepositories ? grant.Repositories : config.Repositories,
+        };
+
+        return _scoped.GetOrAdd(ScopeKey(scoped), static (_, state) => new GitHubAppTokenSource(state.scoped, state.client),
+                                (scoped, client));
+    }
+
+    /// <summary>Makes a string that is the same for equal scopes.  Null and empty must differ.</summary>
+    private static string ScopeKey(GitHubAppConfig scope)
+    {
+        var permissions = scope.Permissions?.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => $"{p.Key}={p.Value}");
+        var repositories = scope.Repositories?.Order(StringComparer.Ordinal);
+        return (permissions is null ? "*" : "[" + string.Join(',', permissions) + "]") + "\n" +
+               (repositories is null ? "*" : "[" + string.Join(',', repositories) + "]");
+    }
+
     public async ValueTask<string> GetTokenAsync(CancellationToken cancellationToken)
     {
+        // GitHub might well take these to mean no restriction, which is the opposite.
+        if (config.Permissions is { Count: 0 } || config.Repositories is { Length: 0 })
+            throw new CredentialUnavailableException("The scope of the token is empty, which allows nothing.");
+
         if (_current is { } current && IsFresh(current))
             return current.Token;
 

@@ -11,6 +11,7 @@ namespace Charon;
 /// <param name="RuleLine">Line in the whitelist of the rule that allowed the request.</param>
 /// <param name="Rule">Text of the rule that allowed the request.</param>
 /// <param name="Whitelist">Hash of the whitelist in force, if it got consulted.</param>
+/// <param name="User">The user of the proxy, if the client identified itself as one.</param>
 public sealed record TrafficEntry(
     long Id,
     DateTimeOffset Time,
@@ -24,7 +25,8 @@ public sealed record TrafficEntry(
     string? Reason = null,
     int? RuleLine = null,
     string? Rule = null,
-    string? Whitelist = null);
+    string? Whitelist = null,
+    string? User = null);
 
 /// <summary>
 /// Remembers the most recent requests, and notifies Web UI sessions of them.  Only
@@ -49,12 +51,13 @@ public sealed class TrafficLog(int capacity)
     /// <summary>Records a new request.</summary>
     public TrafficEntry Add(string client, string method, string url, bool allowed,
                             int? status = null, string? note = null, string? reason = null,
-                            int? ruleLine = null, string? rule = null, string? whitelist = null)
+                            int? ruleLine = null, string? rule = null, string? whitelist = null,
+                            string? user = null)
     {
         lock (_lock)
         {
             var entry = new TrafficEntry(++_lastId, DateTimeOffset.UtcNow, client, method, url, allowed,
-                                         status, null, note, reason, ruleLine, rule, whitelist);
+                                         status, null, note, reason, ruleLine, rule, whitelist, user);
             Publish(entry);
             return entry;
         }

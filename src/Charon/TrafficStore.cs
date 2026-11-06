@@ -36,7 +36,7 @@ public sealed record TrafficStoreStatus(string Path, bool Healthy, string? Error
 /// </remarks>
 internal sealed class TrafficStore : IHostedService
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
 
     private const int DefaultQueueCapacity = 64 * 1024;
 
@@ -77,6 +77,7 @@ internal sealed class TrafficStore : IHostedService
             rule_line INTEGER,          -- The rule of the whitelist that allowed it
             rule TEXT,
             whitelist TEXT,             -- See the table whitelists
+            user TEXT,                  -- The user of the proxy, if not anonymous
             PRIMARY KEY(session, id)) WITHOUT ROWID;
 
         CREATE INDEX IF NOT EXISTS requests_by_time ON requests(time_ms);
@@ -109,13 +110,13 @@ internal sealed class TrafficStore : IHostedService
 
         CREATE VIEW IF NOT EXISTS traffic AS
             SELECT datetime(time_ms / 1000, 'unixepoch', 'localtime') AS time,
-                   method, status, allowed, url, reason, note, rule, client, duration_ms
+                   method, status, allowed, url, reason, note, rule, user, client, duration_ms
             FROM requests;
         """;
 
     private const string UpsertRequest = """
         INSERT INTO requests VALUES($session, $id, $time, $client, $method, $url, $allowed, $status,
-                                    $duration, $reason, $note, $ruleLine, $rule, $whitelist)
+                                    $duration, $reason, $note, $ruleLine, $rule, $whitelist, $user)
         ON CONFLICT(session, id) DO UPDATE SET
             status = excluded.status, duration_ms = excluded.duration_ms, note = excluded.note
         """;
@@ -330,6 +331,10 @@ internal sealed class TrafficStore : IHostedService
             if (version > SchemaVersion)
                 throw new InvalidOperationException($"The database is of a newer version, {version}.");
 
+            // This is added last, as VALUES in the upsert goes by the order of the columns.
+            if (version == 1)
+                Execute(database, "ALTER TABLE requests ADD COLUMN user TEXT; DROP VIEW IF EXISTS traffic;");
+
             Execute(database, Schema + $"PRAGMA user_version = {SchemaVersion};");
 
             using (var command = database.CreateCommand())
@@ -343,7 +348,7 @@ internal sealed class TrafficStore : IHostedService
             _upsert = database.CreateCommand();
             _upsert.CommandText = UpsertRequest;
             _upsertParameters = new[] { "session", "id", "time", "client", "method", "url", "allowed", "status",
-                                        "duration", "reason", "note", "ruleLine", "rule", "whitelist" }
+                                        "duration", "reason", "note", "ruleLine", "rule", "whitelist", "user" }
                 .Select(name => new SqliteParameter { ParameterName = "$" + name }).ToArray();
             _upsert.Parameters.AddRange(_upsertParameters);
             _upsert.Prepare();
@@ -485,6 +490,7 @@ internal sealed class TrafficStore : IHostedService
         parameters[11].Value = (object?)entry.RuleLine ?? DBNull.Value;
         parameters[12].Value = (object?)entry.Rule ?? DBNull.Value;
         parameters[13].Value = (object?)entry.Whitelist ?? DBNull.Value;
+        parameters[14].Value = (object?)entry.User ?? DBNull.Value;
     }
 
     /// <summary>

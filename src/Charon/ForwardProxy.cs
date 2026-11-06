@@ -14,6 +14,7 @@ internal sealed class ForwardProxy
     private readonly Whitelist _whitelist;
     private readonly TrafficLog _log;
     private readonly CredentialStore _credentials;
+    private readonly ProxyUserStore _users;
     private readonly HttpMessageInvoker _upstream;
     private readonly ILogger<ForwardProxy> _logger;
     private readonly ForwarderRequestConfig _requestConfig;
@@ -21,6 +22,7 @@ internal sealed class ForwardProxy
     private readonly int _headersMaxBytes;
 
     public ForwardProxy(IHttpForwarder forwarder, Whitelist whitelist, TrafficLog log, CredentialStore credentials,
+                        ProxyUserStore users,
                         HttpMessageInvoker upstream, ILogger<ForwardProxy> logger, CharonOptions options,
                         TrafficStore? store = null)
     {
@@ -28,6 +30,7 @@ internal sealed class ForwardProxy
         _whitelist = whitelist;
         _log = log;
         _credentials = credentials;
+        _users = users;
         _upstream = upstream;
         _logger = logger;
         _requestConfig = new ForwarderRequestConfig { ActivityTimeout = options.ActivityTimeout };
@@ -78,13 +81,32 @@ internal sealed class ForwardProxy
         var request = context.Request;
         var client = context.Connection.RemoteIpAddress + ":" + context.Connection.RemotePort;
 
+        // In a tunnel, this was settled by the CONNECT request.  Otherwise, unlike
+        // for a tunnel, every request on a connection stands on its own.
+        var userName = tunnel?.UserName;
+        var isAuthenticated = tunnel is not null ||
+            ProxyListener.GetAuthenticator(context.Features).TryAuthenticate(request.Headers.ProxyAuthorization, out userName);
+
+        ProxyUser? user = null;
+        if (!isAuthenticated || (userName is not null && (user = _users.Find(userName)) is null))
+        {
+            // The second case is the user being removed.  It then has no credentials.
+            context.Response.Headers.ProxyAuthenticate = ProxyListener.ProxyAuthenticateChallenge;
+            context.Response.Headers.Connection = "close";
+            await RefuseAsync(context, client, userName, StatusCodes.Status407ProxyAuthenticationRequired,
+                              request.Method, context.Features.Get<IHttpRequestFeature>()?.RawTarget ?? "",
+                              "This proxy needs a valid user name and password.",
+                              reason: "wrong proxy credentials");
+            return;
+        }
+
         var capability = RequestPolicy.GetRequiredCapability(context);
 
         if (HttpMethods.IsConnect(request.Method) && capability is null)
         {
             // Only the first request of a connection can be CONNECT: see ProxyListener.
             context.Response.Headers.Connection = "close";
-            await RefuseAsync(context, client, StatusCodes.Status405MethodNotAllowed,
+            await RefuseAsync(context, client, userName, StatusCodes.Status405MethodNotAllowed,
                               request.Method, tunnel is null ? "(proxy)" : "(tunnel)",
                               "CONNECT must be the first request on a connection to this proxy.",
                               reason: "CONNECT not first");
@@ -93,7 +115,7 @@ internal sealed class ForwardProxy
 
         if (GetDestination(context, tunnel, out string? problem) is not { } destination)
         {
-            await RefuseAsync(context, client,
+            await RefuseAsync(context, client, userName,
                               tunnel is null ? StatusCodes.Status400BadRequest
                                              : StatusCodes.Status421MisdirectedRequest,
                               request.Method, context.Features.Get<IHttpRequestFeature>()?.RawTarget ?? "", problem!,
@@ -105,7 +127,7 @@ internal sealed class ForwardProxy
 
         if (RequestPolicy.FindViolation(request, destination) is { } violation)
         {
-            await RefuseAsync(context, client, StatusCodes.Status403Forbidden, request.Method, url,
+            await RefuseAsync(context, client, userName, StatusCodes.Status403Forbidden, request.Method, url,
                               $"Access Denied: {violation}", reason: "forbidden request", note: violation);
             return;
         }
@@ -116,7 +138,7 @@ internal sealed class ForwardProxy
 
         if (decision.Rule is not { } rule)
         {
-            await RefuseAsync(context, client, StatusCodes.Status403Forbidden, request.Method, url,
+            await RefuseAsync(context, client, userName, StatusCodes.Status403Forbidden, request.Method, url,
                               $"Access Denied: '{url}' (method {request.Method}{Describe(capability)}) " +
                               "is disallowed by the sandbox's whitelist.",
                               reason: capability is { } needed ? $"no {RequestPolicy.RuleType(needed)} rule"
@@ -132,13 +154,15 @@ internal sealed class ForwardProxy
         {
             try
             {
-                credentialValue = await credential.GetValueAsync(context.RequestAborted);
+                // Users opt in to something narrower: other credentials stay as they are.
+                credentialValue = await credential.GetValueAsync(context.RequestAborted,
+                                                                 user?.Credentials.GetValueOrDefault(credential.Name));
             }
             catch (CredentialUnavailableException e)
             {
                 // Going ahead without it would have the agent see confusing failures at best.
                 _logger.LogError("Credential {Name} is unavailable: {Message}", credential.Name, e.Message);
-                await RefuseAsync(context, client, StatusCodes.Status502BadGateway, request.Method, url,
+                await RefuseAsync(context, client, userName, StatusCodes.Status502BadGateway, request.Method, url,
                                   $"The proxy could not obtain the credential '{credential.Name}' for this request.",
                                   reason: "credential unavailable", note: credential.Name,
                                   whitelist: decision.Version);
@@ -148,7 +172,7 @@ internal sealed class ForwardProxy
 
         var entry = _log.Add(client, request.Method, url, allowed: true,
                              note: credential is null ? null : $"Credential {credential.Name}",
-                             ruleLine: rule.Line, rule: rule.Text, whitelist: decision.Version);
+                             ruleLine: rule.Line, rule: rule.Text, whitelist: decision.Version, user: userName);
         long startTime = Stopwatch.GetTimestamp();
 
         // What the client sent: this is before any credential gets added.
@@ -177,12 +201,12 @@ internal sealed class ForwardProxy
         _ => "",
     };
 
-    private Task RefuseAsync(HttpContext context, string client, int status,
+    private Task RefuseAsync(HttpContext context, string client, string? user, int status,
                              string method, string url, string message, string reason,
                              string? note = null, string? whitelist = null)
     {
         var entry = _log.Add(client, method, url, allowed: false, status: status, note: note,
-                             reason: reason, whitelist: whitelist);
+                             reason: reason, whitelist: whitelist, user: user);
         RecordHeaders(entry, context.Request.Headers, isResponse: false, credential: null);
         context.Response.StatusCode = status;
         context.Response.ContentType = "text/plain";

@@ -40,6 +40,11 @@ public sealed class Harness : IAsyncLifetime
 
     /// <summary>Set before starting.</summary>
     public bool RecordHeaders { get; init; } = true;
+
+    /// <summary>Set before starting.</summary>
+    public bool RequireProxyAuthentication { get; init; }
+
+    public string UsersFile => Path.Combine(Directory, "users.json");
     public string AppKeyFile => Path.Combine(Directory, "app-key.pem");
 
     private RSA AppKey { get; } = RSA.Create(2048);
@@ -130,6 +135,8 @@ public sealed class Harness : IAsyncLifetime
             UpstreamRootsFile = rootsFile,
             CredentialsFile = CredentialsFile,
             TrafficDatabaseFile = TrafficDatabaseFile,
+            ProxyUsersFile = UsersFile,
+            RequireProxyAuthentication = RequireProxyAuthentication,
             TrafficHeaders = RecordHeaders,
         });
         await _charon.StartAsync();
@@ -148,14 +155,14 @@ public sealed class Harness : IAsyncLifetime
         WritePrivate(TokenFile, StaticToken + "\n");
         WritePrivate(AppKeyFile, AppKey.ExportPkcs8PrivateKeyPem());
 
-        object App(long installationId) => new
+        object App(long installationId, string[]? repositories = null) => new
         {
             appId = "1234",
             installationId,
             privateKeyFile = AppKeyFile,
             apiBase = $"https://localhost:{HttpsPort}",
             permissions = new Dictionary<string, string> { ["actions"] = "write" },
-            repositories = new[] { "proj" },
+            repositories = repositories ?? ["proj"],
         };
 
         var origin = $"https://localhost:{HttpsPort}";
@@ -168,12 +175,39 @@ public sealed class Harness : IAsyncLifetime
             new { name = "short", origin, url = "/api/short", gitHubApp = App(ShortLivedInstallation) },
             new { name = "refused", origin, url = "/api/refused", gitHubApp = App(BadInstallation) },
             new { name = "no-file", origin, url = "/api/no-file", tokenFile = TokenFile + ".missing" },
+            new { name = "scoped", origin, url = "/api/scoped", gitHubApp = App(ScopedInstallation) },
+            new { name = "empty-main", origin, url = "/api/empty-main", gitHubApp = App(EmptyInstallation, []) },
         }));
+
+        var bobHash = Convert.ToHexStringLower(SHA256.HashData("bob-pw"u8));
+        WritePrivate(UsersFile, $$"""
+            [
+              // Comments are allowed, as in the file of credentials.
+              { "name": "alice", "password": "alice-pw", "credentials": {
+                  "bearer": {},
+                  "key": { "repositories": ["x"] },
+                  "scoped": { "repositories": ["alice-repo"], "permissions": { "contents": "read" } } } },
+              { "name": "bob", "passwordSha256": "{{bobHash}}", "credentials": {
+                  "scoped": { "permissions": { "contents": "read" }, "repositories": ["alice-repo"] } } },
+              { "name": "carol", "password": "carol-pw", "credentials": { "scoped": { "repositories": null } } },
+              { "name": "dave", "password": "dave-pw", "credentials": { "scoped": {} } },
+              { "name": "erin", "password": "erin-pw", "credentials": { "scoped": { "repositories": [] } } },
+              { "name": "frank", "password": "frank-pw", "credentials": { "scoped": { "permissions": {} } } },
+              { "name": "grace", "password": "grace-pw" },
+              { "name": "judy", "password": "judy-pw", "credentials": { "scoped": { "permissions": null } } },
+              { "name": "heidi", "password": "heidi-pw", "credentials": { "scoped": {
+                  "repositories": ["a", "b"], "permissions": { "contents": "read", "actions": "read" } } } },
+              { "name": "ivan", "password": "ivan-pw", "credentials": { "scoped": {
+                  "repositories": ["b", "a"], "permissions": { "actions": "read", "contents": "read" } } } },
+            ]
+            """);
     }
 
     public const long GoodInstallation = 42;
     public const long ShortLivedInstallation = 43;
     public const long BadInstallation = 44;
+    public const long ScopedInstallation = 45;
+    public const long EmptyInstallation = 46;
 
     /// <summary>Stands in for GitHub: verifies the App's token and issues a new one.</summary>
     private async Task IssueTokenAsync(HttpContext context)
@@ -319,9 +353,9 @@ public sealed class Harness : IAsyncLifetime
             return UpstreamRequests.Contains(path);
     }
 
-    private SocketsHttpHandler MakeHandler() => new()
+    private SocketsHttpHandler MakeHandler(ICredentials? proxyCredentials = null) => new()
     {
-        Proxy = new WebProxy($"http://127.0.0.1:{ProxyPort}"),
+        Proxy = new WebProxy($"http://127.0.0.1:{ProxyPort}") { Credentials = proxyCredentials },
         UseProxy = true,
         SslOptions = { CertificateChainPolicy = TrustCharon() },
     };
@@ -338,7 +372,7 @@ public sealed class Harness : IAsyncLifetime
     }
 
     /// <summary>Client that verifies certificates against Charon's CA alone.</summary>
-    public HttpClient MakeClient(Version? version = null) => new(MakeHandler())
+    public HttpClient MakeClient(Version? version = null, ICredentials? proxyCredentials = null) => new(MakeHandler(proxyCredentials))
     {
         DefaultRequestVersion = version ?? HttpVersion.Version11,
         DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
@@ -390,10 +424,21 @@ public sealed class Harness : IAsyncLifetime
     }
 
     /// <summary>Issues CONNECT and does TLS, returning the stream inside the tunnel.</summary>
-    public async Task<SslStream> OpenTunnelAsync(string target, string sni, params string[] alpn)
+    public Task<SslStream> OpenTunnelAsync(string target, string sni, params string[] alpn) =>
+        OpenTunnelAsync(target, sni, "", alpn);
+
+    /// <summary>Makes the value for a Proxy-Authorization header.</summary>
+    public static string BasicAuthorization(string user, string password) =>
+        "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{password}"));
+
+    /// <summary>Opens a tunnel as a user of the proxy.</summary>
+    public Task<SslStream> OpenTunnelAsUserAsync(string user, string password, string target, string sni) =>
+        OpenTunnelAsync(target, sni, $"Proxy-Authorization: {BasicAuthorization(user, password)}\r\n", []);
+
+    private async Task<SslStream> OpenTunnelAsync(string target, string sni, string headers, string[] alpn)
     {
         var stream = await ConnectRawAsync();
-        await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n"));
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{headers}\r\n"));
         var head = await ReadHeadAsync(stream);
         Assert.StartsWith("HTTP/1.1 200", head);
 
