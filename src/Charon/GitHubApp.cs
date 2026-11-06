@@ -19,7 +19,10 @@ internal sealed record GitHubAppConfig
     public required string PrivateKeyFile { get; init; }
 
     /// <summary>Different from the default for GitHub Enterprise Server.</summary>
-    public string ApiBase { get; init; } = "https://api.github.com";
+    public string ApiBase { get; init => field = value ?? ApiBaseDefault; } = ApiBaseDefault;
+
+    /// <summary>The default value for <see cref="ApiBase" />. </summary>
+    public const string ApiBaseDefault = "https://api.github.com";
 
     /// <summary>
     /// If set, tokens get only these of the App's permissions: for example
