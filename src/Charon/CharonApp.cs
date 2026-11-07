@@ -43,6 +43,20 @@ public static class CharonApp
                 ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
             });
 
+            var users = kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>();
+            var logger = kestrel.ApplicationServices.GetRequiredService<ILogger<ProxyUserStore>>();
+            foreach (var user in users.UsersWithSockets)
+            {
+                if (!UnixSockets.Prepare(user.Socket!, logger))
+                    continue;
+
+                kestrel.ListenUnixSocket(user.Socket!, listen =>
+                {
+                    listen.Protocols = HttpProtocols.Http1AndHttp2;
+                    ProxyListener.Configure(listen, ca, log, new FixedUserAuthenticator(user.Name));
+                });
+            }
+
             kestrel.Listen(address, options.UiPort);
         });
 

@@ -45,6 +45,12 @@ public sealed class Harness : IAsyncLifetime
     public bool RequireProxyAuthentication { get; init; }
 
     public string UsersFile => Path.Combine(Directory, "users.json");
+
+    /// <summary>The socket of the user "socket-user".  Its directory is created by Charon.</summary>
+    public string SocketPath => Path.Combine(Directory, "sockets", "user.sock");
+
+    /// <summary>Path of the socket of a user that cannot be listened on, as a file is there.</summary>
+    public string BlockedSocketPath => Path.Combine(Directory, "blocked.sock");
     public string AppKeyFile => Path.Combine(Directory, "app-key.pem");
 
     private RSA AppKey { get; } = RSA.Create(2048);
@@ -60,11 +66,30 @@ public sealed class Harness : IAsyncLifetime
 
     public string CaFile => Path.Combine(Directory, "ca.crt");
 
+    private static int _lastPort = 20_000 + Environment.ProcessId % 5_000;
+
+    /// <summary>
+    /// Finds a port to listen on later.  Letting the system pick would give an ephemeral
+    /// port, which any outgoing connection could get in the meantime, of which
+    /// the tests make many.  So this goes by a counter, from below the ephemeral range.
+    /// </summary>
     private static int FreePort()
     {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
+        while (true)
+        {
+            int port = Interlocked.Increment(ref _lastPort);
+            try
+            {
+                using var ipv4 = new TcpListener(IPAddress.Loopback, port);
+                ipv4.Start();
+                using var ipv6 = new TcpListener(IPAddress.IPv6Loopback, port);
+                ipv6.Start();
+                return port;
+            }
+            catch (SocketException e) when (e.SocketErrorCode == SocketError.AddressAlreadyInUse)
+            {
+            }
+        }
     }
 
     private static (X509Certificate2 Root, X509Certificate2 Leaf) MakeServerCertificate(string name)
@@ -153,6 +178,7 @@ public sealed class Harness : IAsyncLifetime
     private void WriteCredentials()
     {
         WritePrivate(TokenFile, StaticToken + "\n");
+        File.WriteAllText(BlockedSocketPath, "not a socket");
         WritePrivate(AppKeyFile, AppKey.ExportPkcs8PrivateKeyPem());
 
         object App(long installationId, string[]? repositories = null) => new
@@ -194,6 +220,9 @@ public sealed class Harness : IAsyncLifetime
               { "name": "erin", "password": "erin-pw", "credentials": { "scoped": { "repositories": [] } } },
               { "name": "frank", "password": "frank-pw", "credentials": { "scoped": { "permissions": {} } } },
               { "name": "grace", "password": "grace-pw" },
+              { "name": "socket-user", "socket": "{{SocketPath}}", "credentials": {
+                  "scoped": { "repositories": ["socket-repo"] } } },
+              { "name": "blocked", "socket": "{{BlockedSocketPath}}" },
               { "name": "judy", "password": "judy-pw", "credentials": { "scoped": { "permissions": null } } },
               { "name": "heidi", "password": "heidi-pw", "credentials": { "scoped": {
                   "repositories": ["a", "b"], "permissions": { "contents": "read", "actions": "read" } } } },
@@ -400,13 +429,20 @@ public sealed class Harness : IAsyncLifetime
         var deadline = DateTime.UtcNow.AddSeconds(5);
         while (true)
         {
-            await using var database = new SqliteConnection($"Data Source={TrafficDatabaseFile};Pooling=False;Mode=ReadOnly");
-            database.Open();
-            await using var command = database.CreateCommand();
-            command.CommandText = sql;
-            await using var reader = await command.ExecuteReaderAsync();
-            if (await reader.ReadAsync())
-                return read(reader);
+            try
+            {
+                await using var database = new SqliteConnection($"Data Source={TrafficDatabaseFile};Pooling=False;Mode=ReadOnly");
+                database.Open();
+                await using var command = database.CreateCommand();
+                command.CommandText = sql;
+                await using var reader = await command.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                    return read(reader);
+            }
+            catch (SqliteException) when (DateTime.UtcNow < deadline)
+            {
+                // Just after starting, the database or its tables may not exist yet.
+            }
 
             Assert.True(DateTime.UtcNow < deadline, $"No result from: {sql}");
             await Task.Delay(50);
@@ -414,6 +450,32 @@ public sealed class Harness : IAsyncLifetime
     }
 
     /// <summary>Opens a connection to the proxy that is under the test's complete control.</summary>
+    public async Task<Stream> ConnectUnixAsync()
+    {
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await socket.ConnectAsync(new UnixDomainSocketEndPoint(SocketPath));
+        var stream = new NetworkStream(socket, ownsSocket: true);
+        stream.ReadTimeout = 10_000;
+        return stream;
+    }
+
+    /// <summary>Opens a tunnel through the socket of the user "socket-user".</summary>
+    public async Task<SslStream> OpenTunnelOverSocketAsync(string headers = "")
+    {
+        var target = $"localhost:{HttpsPort}";
+        var stream = await ConnectUnixAsync();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{headers}\r\n"));
+        Assert.StartsWith("HTTP/1.1 200", await ReadHeadAsync(stream));
+
+        var tls = new SslStream(stream);
+        await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            CertificateChainPolicy = TrustCharon(),
+        });
+        return tls;
+    }
+
     public async Task<Stream> ConnectRawAsync()
     {
         var client = new TcpClient { NoDelay = true };

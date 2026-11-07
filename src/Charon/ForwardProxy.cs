@@ -79,7 +79,7 @@ internal sealed class ForwardProxy
             Interlocked.Increment(ref tunnel.RequestCount);
 
         var request = context.Request;
-        var client = context.Connection.RemoteIpAddress + ":" + context.Connection.RemotePort;
+        var client = context.Connection.RemoteIpAddress is { } ip ? $"{ip}:{context.Connection.RemotePort}" : "unix";
 
         // In a tunnel, this was settled by the CONNECT request.  Otherwise, unlike
         // for a tunnel, every request on a connection stands on its own.

@@ -162,6 +162,35 @@ set the environment variable `GIT_HTTP_PROXY_AUTHMETHOD=basic` in the sandbox, o
 `RequireProxyAuthentication`.  Other programs tested (`curl`, Python, Node.js and Claude Code) send it
 regardless.  The column `user` of the traffic database and the Web UI show who a request was from.
 
+### Unix domain sockets
+
+Instead of a password, a user can have a Unix domain socket of its own.  Whoever connects to it
+is that user, so there is nothing for an agent to know, and nothing that can leak.  What is
+sent in `Proxy-Authorization` there is ignored.  This also avoids the problem with git above.
+
+```jsonc
+[
+  {
+    "name": "agent-charon",
+    "socket": "/run/user/1000/charon/agent-charon/proxy.sock",
+    "credentials": { "charon-git": { "repositories": [ "Charon" ] } }
+  }
+]
+```
+
+  - A user with a socket needs no password, and without one, it can only use its socket.
+    It can have a password too.
+  - Paths must be absolute, and at most 107 bytes.  The directory is created if needed, private
+    to the owner.  Sockets left behind by a process that died are replaced.
+  - Sockets are only set up when the proxy starts, so adding or moving one needs a restart.
+    Other changes to the user apply straight away.
+  - If one cannot be used, because something else is at that path, it is reported in the log and
+    skipped.  The rest of the proxy works.
+  - Have the sandbox bind the **directory** of the socket, not the socket itself.  The socket is
+    replaced whenever the proxy restarts, and a bind mount stays with the old one.
+  - Clients need a forwarder inside the sandbox, as they expect a proxy at a TCP address.  For example:
+    `socat TCP-LISTEN:8080,bind=127.0.0.1,fork UNIX-CONNECT:/path/to/proxy.sock`.
+
 ### Scopes of tokens
 
 For a GitHub App, `permissions` and `repositories` set what tokens can do, both in `credentials.json`

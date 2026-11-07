@@ -70,6 +70,12 @@ internal sealed class ProxyUserConfig
     public string? PasswordSha256 { get; init; }
 
     /// <summary>
+    /// Absolute path of a Unix domain socket to listen on for this user alone, who then
+    /// needs no password.  This is read when the proxy starts.
+    /// </summary>
+    public string? Socket { get; init; }
+
+    /// <summary>
     /// How credentials differ for this user, by name.  For those
     /// not listed, it gets the same as an anonymous client.
     /// </summary>
@@ -86,7 +92,12 @@ internal partial class ProxyUserJsonContext : JsonSerializerContext
 }
 
 /// <summary>An identified client of the proxy.</summary>
-internal sealed record ProxyUser(string Name, byte[] PasswordHash, Dictionary<string, CredentialGrant> Credentials);
+/// <param name="Name">The user name.</param>
+/// <param name="PasswordHash">The hash of its password, or null if it only uses its socket.</param>
+/// <param name="Socket">Path of its Unix domain socket, if it has one.</param>
+/// <param name="Credentials">How credentials differ for it.</param>
+internal sealed record ProxyUser(string Name, byte[]? PasswordHash, string? Socket,
+                                 Dictionary<string, CredentialGrant> Credentials);
 
 /// <summary>
 /// The users of the proxy.  These are to limit the damage from an agent making
@@ -155,23 +166,39 @@ internal sealed class ProxyUserStore : IClientAuthenticator, IDisposable
             if (config.Name.Length == 0 || config.Name.Contains(':') || config.Name.Any(char.IsControl))
                 throw new FormatException("A user has an invalid name: it cannot contain a colon.");
 
-            if ((config.Password is null) == (config.PasswordSha256 is null))
-                throw new FormatException($"User {config.Name} must have one of password or passwordSha256.");
+            if (config.Password is not null && config.PasswordSha256 is not null)
+                throw new FormatException($"User {config.Name} cannot have both password and passwordSha256.");
 
-            byte[] hash;
+            if (config.Password is null && config.PasswordSha256 is null && config.Socket is null)
+                throw new FormatException($"User {config.Name} must have a password or a socket.");
+
+            if (config.Socket is { } socket && !UnixSockets.IsValidPath(socket))
+            {
+                throw new FormatException(
+                    $"User {config.Name} has an invalid socket: it must be an absolute path of " +
+                    $"at most {UnixSockets.MaxPathLength} bytes.");
+            }
+
+            byte[]? hash = null;
             try
             {
-                hash = config.Password is { } password ? Hash(password) : Convert.FromHexString(config.PasswordSha256!);
+                if (config.Password is { } password)
+                    hash = Hash(password);
+                else if (config.PasswordSha256 is { } passwordHash)
+                    hash = Convert.FromHexString(passwordHash);
             }
             catch (FormatException)
             {
                 throw new FormatException($"User {config.Name} has an invalid passwordSha256.");
             }
 
-            if (hash.Length != SHA256.HashSizeInBytes)
+            if (hash is not null && hash.Length != SHA256.HashSizeInBytes)
                 throw new FormatException($"User {config.Name} has an invalid passwordSha256.");
 
-            if (!users.TryAdd(config.Name, new ProxyUser(config.Name, hash, config.Credentials ?? new())))
+            if (config.Socket is not null && users.Values.Any(user => user.Socket == config.Socket))
+                throw new FormatException($"The socket of user {config.Name} is that of another user.");
+
+            if (!users.TryAdd(config.Name, new ProxyUser(config.Name, hash, config.Socket, config.Credentials ?? new())))
                 throw new FormatException($"There is more than one user named {config.Name}.");
         }
 
@@ -179,6 +206,9 @@ internal sealed class ProxyUserStore : IClientAuthenticator, IDisposable
     }
 
     private static byte[] Hash(string password) => SHA256.HashData(Encoding.UTF8.GetBytes(password));
+
+    /// <summary>The users that have sockets of their own.</summary>
+    public IEnumerable<ProxyUser> UsersWithSockets => _users.Values.Where(user => user.Socket is not null);
 
     /// <summary>Gets a user by name, which fails if it has since been removed.</summary>
     public ProxyUser? Find(string name) => _users.GetValueOrDefault(name);
@@ -208,10 +238,10 @@ internal sealed class ProxyUserStore : IClientAuthenticator, IDisposable
         }
 
         int colon = decoded.IndexOf(':');
-        if (colon < 0 || Find(decoded[..colon]) is not { } user)
+        if (colon < 0 || Find(decoded[..colon]) is not { PasswordHash: { } passwordHash } user)
             return false;
 
-        if (!CryptographicOperations.FixedTimeEquals(Hash(decoded[(colon + 1)..]), user.PasswordHash))
+        if (!CryptographicOperations.FixedTimeEquals(Hash(decoded[(colon + 1)..]), passwordHash))
             return false;
 
         userName = user.Name;
