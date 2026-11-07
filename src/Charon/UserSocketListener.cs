@@ -71,6 +71,9 @@ internal sealed class UserSocketListener : IConnectionListener
         _users = users;
         _logger = loggerFactory.CreateLogger<UserSocketListener>();
         _connectionFactory = new SocketConnectionContextFactory(new SocketConnectionFactoryOptions(), _logger);
+
+        // The first time is not in the background, so the sockets are there once Kestrel has started.
+        Reconcile();
         _reconciling = Task.Run(ReconcileRegularlyAsync);
     }
 
@@ -79,11 +82,8 @@ internal sealed class UserSocketListener : IConnectionListener
         using var timer = new PeriodicTimer(ReconcileInterval);
         try
         {
-            do
-            {
+            while (await timer.WaitForNextTickAsync(_stopping.Token))
                 Reconcile();
-            }
-            while (await timer.WaitForNextTickAsync(_stopping.Token));
         }
         catch (OperationCanceledException)
         {
