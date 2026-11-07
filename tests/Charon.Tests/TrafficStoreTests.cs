@@ -419,16 +419,17 @@ public sealed class TrafficStoreTests : IDisposable
     [Fact]
     public async Task OldRequestsAreRemoved()
     {
+        // Long enough that a slow machine does not remove the request before the first check.
         var log = new TrafficLog(10);
-        var store = new TrafficStore(Options(retention: TimeSpan.FromMilliseconds(200)), log, _whitelist);
+        var store = new TrafficStore(Options(retention: TimeSpan.FromSeconds(2)), log, _whitelist);
         await store.StartAsync(default);
         log.Add("client", "GET", "https://x.test/old", allowed: true);
         await store.StopAsync(default);
         Assert.Equal(1, Scalar("SELECT count(*) FROM requests"));
 
-        await Task.Delay(300);
+        await Task.Delay(TimeSpan.FromSeconds(2.5));
 
-        var later = new TrafficStore(Options(retention: TimeSpan.FromMilliseconds(200)), new TrafficLog(10), _whitelist);
+        var later = new TrafficStore(Options(retention: TimeSpan.FromSeconds(2)), new TrafficLog(10), _whitelist);
         await later.StartAsync(default);
         await later.StopAsync(default);
         Assert.Equal(0, Scalar("SELECT count(*) FROM requests"));
