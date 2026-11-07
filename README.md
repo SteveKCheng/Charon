@@ -182,10 +182,11 @@ sent in `Proxy-Authorization` there is ignored.  This also avoids the problem wi
     It can have a password too.
   - Paths must be absolute, and at most 107 bytes.  The directory is created if needed, private
     to the owner.  Sockets left behind by a process that died are replaced.
-  - Sockets are only set up when the proxy starts, so adding or moving one needs a restart.
-    Other changes to the user apply straight away.
-  - If one cannot be used, because something else is at that path, it is reported in the log and
-    skipped.  The rest of the proxy works.
+  - Sockets follow the file of users, within a couple of seconds, with no need to restart.
+    If a user is removed, connections that it had open get refused.  If the file is
+    edited into something invalid, the sockets stay as they are until it is fixed.
+  - If a socket cannot be used, because something else is at that path, that is reported in the log,
+    and it is tried again every second.  A socket that gets deleted is also recreated.
   - Have the sandbox bind the **directory** of the socket, not the socket itself.  The socket is
     replaced whenever the proxy restarts, and a bind mount stays with the old one.
   - Clients need a forwarder inside the sandbox, as they expect a proxy at a TCP address.  For example:

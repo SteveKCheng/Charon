@@ -368,6 +368,12 @@ public sealed class Harness : IAsyncLifetime
         _upstream = app;
     }
 
+    /// <summary>Shuts down the proxy, ahead of the rest.</summary>
+    public async Task StopCharonAsync()
+    {
+        await _charon.StopAsync();
+    }
+
     public async Task DisposeAsync()
     {
         await _charon.DisposeAsync();
@@ -450,20 +456,20 @@ public sealed class Harness : IAsyncLifetime
     }
 
     /// <summary>Opens a connection to the proxy that is under the test's complete control.</summary>
-    public async Task<Stream> ConnectUnixAsync()
+    public async Task<Stream> ConnectUnixAsync(string? path = null)
     {
         var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-        await socket.ConnectAsync(new UnixDomainSocketEndPoint(SocketPath));
+        await socket.ConnectAsync(new UnixDomainSocketEndPoint(path ?? SocketPath));
         var stream = new NetworkStream(socket, ownsSocket: true);
         stream.ReadTimeout = 10_000;
         return stream;
     }
 
     /// <summary>Opens a tunnel through the socket of the user "socket-user".</summary>
-    public async Task<SslStream> OpenTunnelOverSocketAsync(string headers = "")
+    public async Task<SslStream> OpenTunnelOverSocketAsync(string headers = "", string? path = null)
     {
         var target = $"localhost:{HttpsPort}";
-        var stream = await ConnectUnixAsync();
+        var stream = await ConnectUnixAsync(path);
         await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{headers}\r\n"));
         Assert.StartsWith("HTTP/1.1 200", await ReadHeadAsync(stream));
 

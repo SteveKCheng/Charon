@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Sockets;
 using System.Text;
 
@@ -26,18 +27,17 @@ internal static class UnixSockets
     public static bool IsValidPath(string path) =>
         Path.IsPathRooted(path) && Encoding.UTF8.GetByteCount(path) <= MaxPathLength;
 
-    /// <summary>
-    /// Makes it possible to bind to a path.  Kestrel fails to start if it cannot, which
-    /// would take down the proxy for all because of a problem with one user.  So that is
-    /// checked for here.  If this returns false, the socket must be skipped.
-    /// </summary>
+    /// <summary>Makes it possible to bind to a path.</summary>
+    /// <param name="path">The path of the socket.</param>
+    /// <param name="problem">What is in the way, if this returns false.</param>
     /// <remarks>
     /// A socket does not get removed if the process dies, and it then gets in the way of
     /// binding.  Care is needed in removing it: connecting to a regular file gets refused
     /// just like connecting to a stale socket, and a live socket is another instance's.
     /// </remarks>
-    public static bool Prepare(string path, ILogger? logger)
+    public static bool TryPrepare(string path, [NotNullWhen(false)] out string? problem)
     {
+        problem = null;
         try
         {
             var directory = Path.GetDirectoryName(path)!;
@@ -49,7 +49,7 @@ internal static class UnixSockets
 
             if (!IsSocket(path))
             {
-                logger?.LogError("Not listening on {Path}: there is a file there that is not a socket", path);
+                problem = "There is a file there that is not a socket.";
                 return false;
             }
 
@@ -64,12 +64,12 @@ internal static class UnixSockets
                 return true;
             }
 
-            logger?.LogError("Not listening on {Path}: something else is listening there", path);
+            problem = "Something else is listening there.";
             return false;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or SocketException)
         {
-            logger?.LogError("Not listening on {Path}: {Message}", path, e.Message);
+            problem = e.Message;
             return false;
         }
     }

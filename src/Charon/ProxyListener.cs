@@ -132,7 +132,12 @@ internal static class ProxyListener
     {
         // Set on all connections, as this is how requests get told apart from the Web UI's.
         connection.Items[typeof(ProxyListener)] = true;
-        connection.Items[typeof(IClientAuthenticator)] = authenticator;
+
+        // A connection can bring its own, if the transport already knows who it is from.
+        if (connection.Items.TryGetValue(typeof(IClientAuthenticator), out var own))
+            authenticator = (IClientAuthenticator)own!;
+        else
+            connection.Items[typeof(IClientAuthenticator)] = authenticator;
 
         string? head;
         try

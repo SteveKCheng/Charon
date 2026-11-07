@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Yarp.ReverseProxy.Forwarder;
@@ -43,19 +44,11 @@ public static class CharonApp
                 ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
             });
 
-            var users = kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>();
-            var logger = kestrel.ApplicationServices.GetRequiredService<ILogger<ProxyUserStore>>();
-            foreach (var user in users.UsersWithSockets)
+            kestrel.Listen(new UserSocketsEndPoint(), listen =>
             {
-                if (!UnixSockets.Prepare(user.Socket!, logger))
-                    continue;
-
-                kestrel.ListenUnixSocket(user.Socket!, listen =>
-                {
-                    listen.Protocols = HttpProtocols.Http1AndHttp2;
-                    ProxyListener.Configure(listen, ca, log, new FixedUserAuthenticator(user.Name));
-                });
-            }
+                listen.Protocols = HttpProtocols.Http1AndHttp2;
+                ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
+            });
 
             kestrel.Listen(address, options.UiPort);
         });
@@ -77,6 +70,7 @@ public static class CharonApp
             options.ProxyUsersFile, options.RequireProxyAuthentication, services.GetRequiredService<CredentialStore>(),
             services.GetRequiredService<ILoggerFactory>().CreateLogger<ProxyUserStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
+        builder.Services.AddSingleton<IConnectionListenerFactory, UserSocketListenerFactory>();
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.TypeInfoResolverChain.Insert(0, CharonAppJsonContext.Default));
 

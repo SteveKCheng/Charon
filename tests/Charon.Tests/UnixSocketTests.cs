@@ -136,7 +136,7 @@ public sealed class UnixSocketPreparationTests : IDisposable
     public void NothingThereIsFine()
     {
         var path = Path.Combine(_directory, "new", "s.sock");
-        Assert.True(UnixSockets.Prepare(path, null));
+        Assert.True(UnixSockets.TryPrepare(path, out _));
         Assert.True(Directory.Exists(Path.GetDirectoryName(path)));
     }
 
@@ -146,7 +146,7 @@ public sealed class UnixSocketPreparationTests : IDisposable
         MakeStaleSocket();
         Assert.True(File.Exists(SocketPath));
 
-        Assert.True(UnixSockets.Prepare(SocketPath, null));
+        Assert.True(UnixSockets.TryPrepare(SocketPath, out _));
 
         using var socket = NewSocket();
         socket.Bind(new UnixDomainSocketEndPoint(SocketPath));
@@ -156,7 +156,7 @@ public sealed class UnixSocketPreparationTests : IDisposable
     public void RegularFileIsLeftAlone()
     {
         File.WriteAllText(SocketPath, "precious");
-        Assert.False(UnixSockets.Prepare(SocketPath, null));
+        Assert.False(UnixSockets.TryPrepare(SocketPath, out _));
         Assert.Equal("precious", File.ReadAllText(SocketPath));
     }
 
@@ -167,7 +167,7 @@ public sealed class UnixSocketPreparationTests : IDisposable
         listener.Bind(new UnixDomainSocketEndPoint(SocketPath));
         listener.Listen();
 
-        Assert.False(UnixSockets.Prepare(SocketPath, null));
+        Assert.False(UnixSockets.TryPrepare(SocketPath, out _));
 
         using var client = NewSocket();
         client.Connect(new UnixDomainSocketEndPoint(SocketPath));

@@ -71,7 +71,7 @@ internal sealed class ProxyUserConfig
 
     /// <summary>
     /// Absolute path of a Unix domain socket to listen on for this user alone, who then
-    /// needs no password.  This is read when the proxy starts.
+    /// needs no password.
     /// </summary>
     public string? Socket { get; init; }
 
