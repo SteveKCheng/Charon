@@ -1,4 +1,3 @@
-using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -24,7 +23,7 @@ public static class CharonApp
     {
         var ca = CertificateAuthority.LoadOrCreate(options.CaCertificateFile, options.CaKeyFile);
         var log = new TrafficLog(options.TrafficLogCapacity);
-        var address = IPAddress.Parse(options.ListenAddress);
+        var (proxyAddresses, uiAddresses) = ListenAddresses.ParseSettings(options);
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
@@ -38,19 +37,19 @@ public static class CharonApp
             kestrel.Limits.MaxRequestLineSize = 64 * 1024;
             kestrel.Limits.Http2.MaxRequestHeaderFieldSize = 64 * 1024;
 
-            kestrel.Listen(address, options.ProxyPort, listen =>
+            void ConfigureProxy(ListenOptions listen)
             {
                 listen.Protocols = HttpProtocols.Http1AndHttp2;
                 ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
-            });
+            }
 
-            kestrel.Listen(new UserSocketsEndPoint(), listen =>
-            {
-                listen.Protocols = HttpProtocols.Http1AndHttp2;
-                ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
-            });
+            foreach (var endPoint in proxyAddresses)
+                ListenAddresses.Listen(kestrel, endPoint, ConfigureProxy);
 
-            kestrel.Listen(address, options.UiPort);
+            kestrel.Listen(new UserSocketsEndPoint(), ConfigureProxy);
+
+            foreach (var endPoint in uiAddresses)
+                ListenAddresses.Listen(kestrel, endPoint, _ => { });
         });
 
         // These log a few lines for every request, which is what the Web UI is for.

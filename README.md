@@ -16,8 +16,38 @@ The proxy listens on `127.0.0.1:8080` and the Web UI on `127.0.0.1:8081`.  In th
 sandbox, set `http_proxy` and `HTTPS_PROXY`, and have clients trust the CA certificate.
 It is generated on first run as `~/.config/charon/ca.crt`, or downloadable from the Web UI.
 
-Settings are the properties of [`CharonOptions`](src/Charon/CharonOptions.cs), which may be
-given as environment variables such as `Charon__ProxyPort=8080`, or on the command line.
+Settings are the properties of [`CharonOptions`](src/Charon/CharonOptions.cs), in the section
+`Charon` of `appsettings.json`, in the directory given by `--contentRoot`.  They may also be
+given as environment variables such as `Charon__TrafficHeaders=true`, or on the command line.
+Charon does not start if there is a setting it does not know, so that a misspelling
+cannot go unnoticed.
+
+### Addresses to listen on
+
+`ProxyListen` and `UiListen` are lists of addresses, each one of:
+
+  - an IPv4 address and port: `127.0.0.1:8080`, or `0.0.0.0:8080` for all interfaces;
+  - an IPv6 address in brackets and port: `[::1]:8080`, or `[::]:8080` for all interfaces;
+  - the absolute path of a Unix domain socket: `/run/user/1000/charon/proxy.sock`.
+
+```json
+{
+  "Charon": {
+    "ProxyListen": [ "127.0.0.1:8080", "[::1]:8080", "192.168.122.1:8080" ],
+    "UiListen": [ "127.0.0.1:8081" ]
+  }
+}
+```
+
+Hostnames such as `localhost` are not accepted, so that what gets listened on is never in doubt.
+An empty list means not listening at all, which suits a proxy used only through the sockets of
+its users.  As environment variables, the elements are numbered: `Charon__ProxyListen__0`.
+
+Clients connecting through a Unix domain socket here are not any user, unless they log in.
+For sockets that each belong to one user, see [Unix domain sockets](#unix-domain-sockets).
+The directory of the socket is created if need be.  A socket left behind by a Charon that
+crashed is replaced, but Charon does not start if something else is at the path, or if
+any address cannot be listened on.
 
 To carry on with the CA of an existing mitmproxy installation, so that sandboxes need no changes:
 

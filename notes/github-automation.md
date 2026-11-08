@@ -66,7 +66,7 @@ everything without any error being logged.  Misspelt settings are silently ignor
 out/publish/Charon/release_linux-x64/charon --contentRoot ~/.config/charon
 ```
 
-That is the executable compiled ahead of time, by `dotnet publish src/Charon -c Release`.
+That is the executable compiled ahead of time, by `dotnet publish src/Charon -c Release -r linux-x64`.
 
 Credentials go in `~/.config/charon/credentials.json`, which also needs `chmod 600`.
 There must be two entries.  The REST API and git are at different origins, and git

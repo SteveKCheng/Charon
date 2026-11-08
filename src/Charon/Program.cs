@@ -1,5 +1,5 @@
 using Charon;
 
 var builder = WebApplication.CreateSlimBuilder(args);
-var options = builder.Configuration.GetSection("Charon").Get<CharonOptions>() ?? new CharonOptions();
+var options = CharonOptions.Load(builder.Configuration);
 CharonApp.Build(builder, options).Run();

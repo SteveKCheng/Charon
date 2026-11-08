@@ -175,7 +175,7 @@ internal static class ProxyListener
             // Being asked for a password is a normal step for many clients, unlike getting it wrong.
             if (proxyAuthorization is not null)
             {
-                log.Add(connection.RemoteEndPoint?.ToString() ?? "unix", "CONNECT",
+                log.Add(ListenAddresses.NameOfClient(connection.RemoteEndPoint), "CONNECT",
                         $"{authority.UrlHost}:{authority.Port}", allowed: false,
                         status: StatusCodes.Status407ProxyAuthenticationRequired, reason: "wrong proxy credentials");
             }
@@ -194,7 +194,7 @@ internal static class ProxyListener
         // certificates or is not speaking HTTP, would not show up anywhere.
         if (tunnel.RequestCount == 0)
         {
-            log.Add(connection.RemoteEndPoint?.ToString() ?? "unix", "CONNECT",
+            log.Add(ListenAddresses.NameOfClient(connection.RemoteEndPoint), "CONNECT",
                     $"{authority.UrlHost}:{authority.Port}", allowed: false,
                     note: "No HTTP request was received in the tunnel", reason: "no HTTP in tunnel", user: userName);
         }

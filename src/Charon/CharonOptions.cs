@@ -1,5 +1,3 @@
-using System.Net;
-
 namespace Charon;
 
 /// <summary>Settings, bound from the "Charon" configuration section.</summary>
@@ -8,12 +6,19 @@ public sealed class CharonOptions
     private static readonly string ConfigDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "charon");
 
-    /// <summary>Address that the proxy and the Web UI listen on.</summary>
-    public string ListenAddress { get; set; } = IPAddress.Loopback.ToString();
+    public static readonly string[] DefaultProxyListen = ["127.0.0.1:8080"];
 
-    public int ProxyPort { get; set; } = 8080;
+    public static readonly string[] DefaultUiListen = ["127.0.0.1:8081"];
 
-    public int UiPort { get; set; } = 8081;
+    /// <summary>
+    /// Addresses that the proxy listens on: <see cref="ListenAddresses.Forms"/>.
+    /// Null means <see cref="DefaultProxyListen"/>, and empty means none.  The default is not
+    /// assigned here, as binding configuration would add to it instead of replacing it.
+    /// </summary>
+    public string[]? ProxyListen { get; set; }
+
+    /// <summary>Addresses that the Web UI listens on, in the same way as <see cref="ProxyListen"/>.</summary>
+    public string[]? UiListen { get; set; }
 
     /// <summary>Same format as the whitelist of the mitmproxy-whitelist add-in.</summary>
     public string WhitelistFile { get; set; } = Path.Combine(ConfigDirectory, "whitelist.txt");
@@ -85,4 +90,9 @@ public sealed class CharonOptions
 
     /// <summary>Number of requests retained for display in the Web UI.</summary>
     public int TrafficLogCapacity { get; set; } = 10_000;
+
+    /// <summary>Reads the settings, refusing any that are not known so that misspellings do not go unnoticed.</summary>
+    public static CharonOptions Load(IConfiguration configuration) =>
+        configuration.GetSection("Charon").Get<CharonOptions>(binder => binder.ErrorOnUnknownConfiguration = true)
+        ?? new CharonOptions();
 }

@@ -49,6 +49,11 @@ public sealed class Harness : IAsyncLifetime
     /// <summary>The socket of the user "socket-user".  Its directory is created by Charon.</summary>
     public string SocketPath => Path.Combine(Directory, "sockets", "user.sock");
 
+    /// <summary>Unix domain socket of the proxy that is not any user's, so its clients are anonymous.</summary>
+    public string ProxySocketPath => Path.Combine(Directory, "proxy.sock");
+
+    public string UiSocketPath => Path.Combine(Directory, "ui.sock");
+
     /// <summary>Path of the socket of a user that cannot be listened on, as a file is there.</summary>
     public string BlockedSocketPath => Path.Combine(Directory, "blocked.sock");
     public string AppKeyFile => Path.Combine(Directory, "app-key.pem");
@@ -152,8 +157,8 @@ public sealed class Harness : IAsyncLifetime
         builder.Logging.ClearProviders();
         _charon = CharonApp.Build(builder, new CharonOptions
         {
-            ProxyPort = ProxyPort,
-            UiPort = UiPort,
+            ProxyListen = [$"127.0.0.1:{ProxyPort}", $"[::1]:{ProxyPort}", ProxySocketPath],
+            UiListen = [$"127.0.0.1:{UiPort}", UiSocketPath],
             WhitelistFile = WhitelistFile,
             CaCertificateFile = CaFile,
             CaKeyFile = Path.Combine(Directory, "ca.key"),
@@ -376,7 +381,9 @@ public sealed class Harness : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        await _charon.DisposeAsync();
+        // Charon is not there if it failed to start.
+        if (_charon is not null)
+            await _charon.DisposeAsync();
         await _upstream.DisposeAsync();
         _rawUpstream.Stop();
         System.IO.Directory.Delete(Directory, recursive: true);
