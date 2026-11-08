@@ -1,3 +1,4 @@
+using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -19,7 +20,12 @@ public static class CharonApp
         $"{GitVersionInformation.SemVer}+{GitVersionInformation.ShortSha}" +
         (GitVersionInformation.UncommittedChanges == "0" ? "" : ".modified");
 
-    public static WebApplication Build(WebApplicationBuilder builder, CharonOptions options)
+    public static WebApplication Build(WebApplicationBuilder builder, CharonOptions options) =>
+        Build(builder, options, InheritedSockets.FromEnvironment);
+
+    /// <param name="inheritSockets">Gets the sockets passed for socket activation.</param>
+    internal static WebApplication Build(WebApplicationBuilder builder, CharonOptions options,
+                                         Func<ILogger, InheritedSockets> inheritSockets)
     {
         var ca = CertificateAuthority.LoadOrCreate(options.CaCertificateFile, options.CaKeyFile);
         var log = new TrafficLog(options.TrafficLogCapacity);
@@ -43,13 +49,38 @@ public static class CharonApp
                 ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
             }
 
+            var inherited = kestrel.ApplicationServices.GetRequiredService<InheritedSockets>();
+            var logger = kestrel.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(CharonApp));
+
+            // A socket from systemd is used if it is on an address that would be listened on anyway.
+            void Listen(EndPoint endPoint, string role, Action<ListenOptions> configure)
+            {
+                if (inherited.TryTake(endPoint, out var socket))
+                {
+                    kestrel.Listen(new InheritedEndPoint(socket), configure);
+                    logger.LogInformation("Listening on {Address} for the {Role}, with the socket from systemd", endPoint, role);
+                    return;
+                }
+
+                ListenAddresses.Listen(kestrel, endPoint, configure);
+                if (inherited.IsActivated)
+                {
+                    logger.LogWarning("Listening on {Address} for the {Role}, but systemd did not pass a socket for it, " +
+                                      "so connecting to it will not start Charon", endPoint, role);
+                }
+                else
+                {
+                    logger.LogInformation("Listening on {Address} for the {Role}", endPoint, role);
+                }
+            }
+
             foreach (var endPoint in proxyAddresses)
-                ListenAddresses.Listen(kestrel, endPoint, ConfigureProxy);
+                Listen(endPoint, "proxy", ConfigureProxy);
 
             kestrel.Listen(new UserSocketsEndPoint(), ConfigureProxy);
 
             foreach (var endPoint in uiAddresses)
-                ListenAddresses.Listen(kestrel, endPoint, _ => { });
+                Listen(endPoint, "Web UI", _ => { });
         });
 
         // These log a few lines for every request, which is what the Web UI is for.
@@ -70,6 +101,9 @@ public static class CharonApp
             services.GetRequiredService<ILoggerFactory>().CreateLogger<ProxyUserStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
         builder.Services.AddSingleton<IConnectionListenerFactory, UserSocketListenerFactory>();
+        builder.Services.AddSingleton<IConnectionListenerFactory, InheritedSocketListenerFactory>();
+        builder.Services.AddSingleton(services =>
+            inheritSockets(services.GetRequiredService<ILoggerFactory>().CreateLogger<InheritedSockets>()));
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.TypeInfoResolverChain.Insert(0, CharonAppJsonContext.Default));
 

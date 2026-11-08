@@ -8,6 +8,12 @@ namespace Charon.Tests;
 /// <summary>Taking the sockets that systemd passes, made here by the tests instead.</summary>
 public sealed class InheritedSocketTests : IDisposable
 {
+    private static (int Descriptor, string Target) Release(Socket socket) => Descriptors.Release(socket);
+
+    private static (int Descriptor, string Target) Release(SafeHandle handle) => Descriptors.Release(handle);
+
+    private static bool IsOpen(string target) => Descriptors.IsOpen(target);
+
     private readonly string _directory = Directory.CreateTempSubdirectory("charon-inherit").FullName;
     private readonly ListLogger _logger = new();
 
@@ -27,44 +33,6 @@ public sealed class InheritedSocketTests : IDisposable
 
         public IEnumerable<string> Warnings => Entries.Where(e => e.Level == LogLevel.Warning).Select(e => e.Message);
     }
-
-    /// <summary>
-    /// Gives up a descriptor without closing it, as it would be on being passed to a new
-    /// process.  What it was is returned, to find whether it is still open later.
-    /// </summary>
-    private static (int Descriptor, string Target) Release(SafeHandle handle)
-    {
-        int descriptor = (int)handle.DangerousGetHandle();
-        var target = Target(descriptor)!;
-        handle.SetHandleAsInvalid();
-        return (descriptor, target);
-    }
-
-    private static (int Descriptor, string Target) Release(Socket socket)
-    {
-        // It must not be disposed or finalized after this, as that would never finish.
-        GC.SuppressFinalize(socket);
-        return Release(socket.SafeHandle);
-    }
-
-    private static string? Target(int descriptor) => new FileInfo($"/proc/self/fd/{descriptor}").LinkTarget;
-
-    /// <summary>
-    /// Whether anything in this process still refers to what a descriptor was.  Its number
-    /// may have been reused, by any test running at the same time, but a socket's inode is not.
-    /// </summary>
-    private static bool IsOpen(string target) =>
-        Directory.EnumerateFileSystemEntries("/proc/self/fd").Any(path =>
-        {
-            try
-            {
-                return new FileInfo(path).LinkTarget == target;
-            }
-            catch (IOException)
-            {
-                return false;
-            }
-        });
 
     private static Socket Listening(EndPoint endPoint)
     {

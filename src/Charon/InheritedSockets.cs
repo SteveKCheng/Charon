@@ -44,6 +44,9 @@ internal sealed class InheritedSockets : IDisposable
 
     public static InheritedSockets None(ILogger logger) => new([], [], logger);
 
+    /// <summary>Whether systemd passed any descriptors, even if none could be used.</summary>
+    public bool IsActivated { get; }
+
     /// <summary>
     /// Takes what systemd passed to this process, as <c>sd_listen_fds(3)</c> does, and
     /// unsets the variables that say so, which are not meant for any other process.
@@ -98,6 +101,7 @@ internal sealed class InheritedSockets : IDisposable
     internal InheritedSockets(IReadOnlyList<int> descriptors, IReadOnlyList<string> names, ILogger logger)
     {
         _logger = logger;
+        IsActivated = descriptors.Count > 0;
         for (int i = 0; i < descriptors.Count; i++)
         {
             var name = i < names.Count && names[i].Length > 0 ? names[i] : null;

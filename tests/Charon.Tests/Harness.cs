@@ -44,6 +44,12 @@ public sealed class Harness : IAsyncLifetime
     /// <summary>Set before starting.</summary>
     public bool RequireProxyAuthentication { get; init; }
 
+    /// <summary>
+    /// Listening sockets to pass to Charon as systemd would, added before starting.  They must
+    /// not be used once Charon has started, as their descriptors are then Charon's.
+    /// </summary>
+    public List<(Socket Socket, string Name)> SystemdSockets { get; } = new();
+
     public string UsersFile => Path.Combine(Directory, "users.json");
 
     /// <summary>The socket of the user "socket-user".  Its directory is created by Charon.</summary>
@@ -155,6 +161,8 @@ public sealed class Harness : IAsyncLifetime
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
+        var passed = SystemdSockets.Select(s => Descriptors.Release(s.Socket).Descriptor).ToArray();
+        var names = SystemdSockets.Select(s => s.Name).ToArray();
         _charon = CharonApp.Build(builder, new CharonOptions
         {
             ProxyListen = [$"127.0.0.1:{ProxyPort}", $"[::1]:{ProxyPort}", ProxySocketPath],
@@ -168,7 +176,7 @@ public sealed class Harness : IAsyncLifetime
             ProxyUsersFile = UsersFile,
             RequireProxyAuthentication = RequireProxyAuthentication,
             TrafficHeaders = RecordHeaders,
-        });
+        }, logger => new InheritedSockets(passed, names, logger));
         await _charon.StartAsync();
     }
 
