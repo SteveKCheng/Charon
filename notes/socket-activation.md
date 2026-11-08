@@ -63,7 +63,8 @@ When your proxy exits, systemd detects the process termination. It will automati
 # Plan for socket activation in Charon
 
 Written on 2026-11-07, after the discussion above, and after Charon learnt to listen on
-lists of addresses (`ProxyListen` and `UiListen`).
+lists of addresses (`ProxyListen` and `UiListen`).  All of the steps were done on 2026-11-08,
+with the differences noted.  What remains is to try it with the real units.
 
 ## What makes Charon unusual
 
@@ -152,8 +153,9 @@ Charon logs, at startup, which addresses came from systemd and which it bound it
 that Charon binds itself go away when it exits, so connecting to them does not start it again.
 A `.socket` unit that leaves something out then shows in the journal.
 
-Still to check: `ListenHandle` was tried with a Unix domain socket only, and should be
-tried with TCP too.
+As done, Kestrel is given the `Socket` itself, through a listener of Charon's own, instead
+of the number of the descriptor by `ListenHandle`.  Otherwise both Kestrel and
+`InheritedSockets` would own the descriptor, and close it.
 
 ### 3. The sockets of users
 
@@ -186,7 +188,9 @@ with 0.  So the traffic database is written out as on any stop.
     socket: it waits in the socket's queue, which systemd keeps open, and starts Charon again.
   - An agent that is still running but idle does not keep Charon up for long.  Kestrel
     closes idle keep-alive connections after `KeepAliveTimeout`, 130 seconds by default.
-    That should include HTTP/2 connections inside tunnels, which is still to be checked.
+    That was checked for HTTP/1.1 inside a tunnel: closed after 132 seconds, and Charon
+    exited 5 seconds after that, with `IdleTimeout` at 5 seconds.  HTTP/2 inside tunnels
+    has not been checked.
 
 What is lost when Charon exits, and gets re-created when it starts again:
 

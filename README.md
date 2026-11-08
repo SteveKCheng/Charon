@@ -56,6 +56,67 @@ Charon__CaCertificateFile=$HOME/.mitmproxy/mitmproxy-ca.pem
 Charon__CaKeyFile=$HOME/.mitmproxy/mitmproxy-ca.pem
 ```
 
+### Starting on demand, with systemd
+
+Charon can be started by systemd on the first connection to it, and stop again when it has had no
+connections for a while.  It then takes no memory while no agents are running.
+
+The sockets listed in the `.socket` unit are passed to Charon.  It uses each one for the address
+that it is bound to, as found in Charon's own settings: `ProxyListen`, `UiListen`, and the
+`socket` of users in `users.json`.  So the unit decides only which addresses start Charon, and
+never what they are for.
+
+  - Addresses in the settings that the unit does not have are listened on by Charon itself,
+    with a warning, as connecting to them does not start Charon.
+  - A socket in the unit that is for nothing in the settings gets a warning, and connections
+    to it are closed.  So is the socket of a user who is removed, until the user is added back.
+  - Addresses must be written the same in both places.  `ListenStream=8080` is
+    `[::]:8080` in the settings, not `127.0.0.1:8080`.  Paths are compared as written,
+    without following symbolic links.
+  - The files of these sockets belong to systemd, and Charon leaves them alone.  The trouble
+    with bind mounts above does not arise for them, as they stay the same when Charon restarts.
+
+```ini
+# ~/.config/systemd/user/charon.socket
+[Socket]
+ListenStream=127.0.0.1:8080
+ListenStream=127.0.0.1:8081
+ListenStream=%t/charon/agent-charon/proxy.sock
+# systemd's default is 0666, which would let any local user use the credentials.
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# ~/.config/systemd/user/charon.service
+[Service]
+ExecStart=%h/bin/charon --contentRoot %h/.config/charon
+# Stopping when idle is with status 0, which must not count as a failure.
+Restart=on-failure
+```
+
+`%t` is `$XDG_RUNTIME_DIR`, which is `/run/user/1000` for user 1000.  Then:
+
+```
+systemctl --user daemon-reload
+systemctl --user enable --now charon.socket
+```
+
+To stop when idle, set `IdleTimeout`, such as `"00:15:00"` for a quarter of an hour.  It counts
+connections to the proxy, to the sockets of users, and to the Web UI: an open tab of it keeps a
+connection open, and so keeps Charon running.  Set `IdleTimeoutCountsWebUI` to `false` for the
+Web UI not to count.  Then leave its address out of the unit, or else an open tab, by
+reconnecting, would start Charon again each time it stops.
+
+`IdleTimeout` takes effect only when Charon was started by systemd, as otherwise nothing would
+start it again.  Clients with connections kept alive but idle let Charon stop after Kestrel closes
+those connections, which is after 130 seconds.  What is in memory starts afresh each time:
+the requests that the Web UI shows, which are still in the traffic database, and the tokens
+from GitHub, which are fetched again.
+
 ## Whitelist
 
 The file `~/.config/charon/whitelist.txt` has the same format as for
