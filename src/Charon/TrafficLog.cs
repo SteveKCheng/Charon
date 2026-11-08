@@ -40,6 +40,7 @@ public sealed class TrafficLog(int capacity)
     private readonly Lock _lock = new();
     private readonly TrafficEntry[] _entries = new TrafficEntry[capacity];
     private readonly List<Channel<TrafficEntry>> _subscribers = new();
+    private bool _completed;
     private long _lastId;
 
     /// <summary>
@@ -83,7 +84,28 @@ public sealed class TrafficLog(int capacity)
         Sink?.Invoke(entry);
     }
 
-    /// <summary>Streams the entries in the log, and then any new or updated ones as they come.</summary>
+    /// <summary>
+    /// Ends the streams of entries, for stopping.  Otherwise they would go on until Kestrel
+    /// gives up waiting for requests to finish, which is half a minute by default.
+    /// </summary>
+    public void Complete()
+    {
+        // Not while locked: completing can run what reads, which then removes itself from the list.
+        Channel<TrafficEntry>[] subscribers;
+        lock (_lock)
+        {
+            _completed = true;
+            subscribers = _subscribers.ToArray();
+        }
+
+        foreach (var subscriber in subscribers)
+            subscriber.Writer.TryComplete();
+    }
+
+    /// <summary>
+    /// Streams the entries in the log, and then any new or updated ones as they come,
+    /// until <see cref="Complete"/>.
+    /// </summary>
     public async IAsyncEnumerable<TrafficEntry> SubscribeAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -98,7 +120,10 @@ public sealed class TrafficLog(int capacity)
         lock (_lock)
         {
             snapshot = _entries.Where(e => e is not null).OrderBy(e => e.Id).ToArray();
-            _subscribers.Add(channel);
+            if (_completed)
+                channel.Writer.Complete();
+            else
+                _subscribers.Add(channel);
         }
 
         try

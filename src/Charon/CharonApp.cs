@@ -30,6 +30,8 @@ public static class CharonApp
         var ca = CertificateAuthority.LoadOrCreate(options.CaCertificateFile, options.CaKeyFile);
         var log = new TrafficLog(options.TrafficLogCapacity);
         var (proxyAddresses, uiAddresses) = ListenAddresses.ParseSettings(options);
+        if (options.IdleTimeout <= TimeSpan.Zero)
+            throw new InvalidOperationException("The setting IdleTimeout must be more than 0, or not set for never stopping.");
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
@@ -43,9 +45,14 @@ public static class CharonApp
             kestrel.Limits.MaxRequestLineSize = 64 * 1024;
             kestrel.Limits.Http2.MaxRequestHeaderFieldSize = 64 * 1024;
 
+            var idleExit = kestrel.ApplicationServices.GetRequiredService<IdleExit>();
+
             void ConfigureProxy(ListenOptions listen)
             {
                 listen.Protocols = HttpProtocols.Http1AndHttp2;
+
+                // First, so that it counts tunnels as well, for as long as they are open.
+                listen.Use(idleExit.Track);
                 ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
             }
 
@@ -79,8 +86,14 @@ public static class CharonApp
 
             kestrel.Listen(new UserSocketsEndPoint(), ConfigureProxy);
 
+            void ConfigureUi(ListenOptions listen)
+            {
+                if (options.IdleTimeoutCountsWebUI)
+                    listen.Use(idleExit.Track);
+            }
+
             foreach (var endPoint in uiAddresses)
-                Listen(endPoint, "Web UI", _ => { });
+                Listen(endPoint, "Web UI", ConfigureUi);
         });
 
         // These log a few lines for every request, which is what the Web UI is for.
@@ -102,6 +115,8 @@ public static class CharonApp
         builder.Services.AddSingleton<ForwardProxy>();
         builder.Services.AddSingleton<IConnectionListenerFactory, UserSocketListenerFactory>();
         builder.Services.AddSingleton<IConnectionListenerFactory, InheritedSocketListenerFactory>();
+        builder.Services.AddSingleton<IdleExit>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<IdleExit>());
         builder.Services.AddSingleton(services =>
             inheritSockets(services.GetRequiredService<ILoggerFactory>().CreateLogger<InheritedSockets>()));
         builder.Services.ConfigureHttpJsonOptions(o =>
@@ -116,6 +131,7 @@ public static class CharonApp
         }
 
         var app = builder.Build();
+        app.Lifetime.ApplicationStopping.Register(log.Complete);
         var proxy = app.Services.GetRequiredService<ForwardProxy>();
 
         // Which listener accepted the connection decides who it talks to.  Host-based routing

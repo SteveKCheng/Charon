@@ -44,6 +44,16 @@ public sealed class Harness : IAsyncLifetime
     /// <summary>Set before starting.</summary>
     public bool RequireProxyAuthentication { get; init; }
 
+    /// <summary>Set before starting.</summary>
+    public TimeSpan? IdleTimeout { get; init; }
+
+    /// <summary>Set before starting.</summary>
+    public bool IdleTimeoutCountsWebUI { get; init; } = true;
+
+    /// <summary>Whether Charon has decided to stop, which it does when idle.</summary>
+    public CancellationToken Stopping =>
+        _charon.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
+
     /// <summary>
     /// Listening sockets to pass to Charon as systemd would, added before starting.  They must
     /// not be used once Charon has started, as their descriptors are then Charon's.
@@ -176,6 +186,8 @@ public sealed class Harness : IAsyncLifetime
             ProxyUsersFile = UsersFile,
             RequireProxyAuthentication = RequireProxyAuthentication,
             TrafficHeaders = RecordHeaders,
+            IdleTimeout = IdleTimeout,
+            IdleTimeoutCountsWebUI = IdleTimeoutCountsWebUI,
         }, logger => new InheritedSockets(passed, names, logger));
         await _charon.StartAsync();
     }

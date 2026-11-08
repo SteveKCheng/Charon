@@ -91,6 +91,18 @@ public sealed class CharonOptions
     /// <summary>Number of requests retained for display in the Web UI.</summary>
     public int TrafficLogCapacity { get; set; } = 10_000;
 
+    /// <summary>
+    /// How long Charon stays running with no connections, if started by systemd's socket
+    /// activation: systemd then starts it again on the next connection.  Null for never stopping.
+    /// </summary>
+    public TimeSpan? IdleTimeout { get; set; }
+
+    /// <summary>
+    /// Whether connections to the Web UI count for <see cref="IdleTimeout"/>.  An open tab
+    /// keeps a connection open, so it then keeps Charon running.
+    /// </summary>
+    public bool IdleTimeoutCountsWebUI { get; set; } = true;
+
     /// <summary>Reads the settings, refusing any that are not known so that misspellings do not go unnoticed.</summary>
     public static CharonOptions Load(IConfiguration configuration) =>
         configuration.GetSection("Charon").Get<CharonOptions>(binder => binder.ErrorOnUnknownConfiguration = true)
