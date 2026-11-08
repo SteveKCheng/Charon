@@ -5,9 +5,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Charon</RootNamespace>
-    <TargetName>charon</TargetName>
     <PublishAot>true</PublishAot>
     <PublishSingleFile>true</PublishSingleFile>
+    <TargetName Condition="'$(_IsPublishing)' == 'true'">charon</TargetName>
   </PropertyGroup>
 
   <ItemGroup>
