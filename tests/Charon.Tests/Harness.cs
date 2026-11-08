@@ -389,11 +389,12 @@ public sealed class Harness : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        // Charon is not there if it failed to start.
+        // Nothing is there if it failed to start, or was never started.
         if (_charon is not null)
             await _charon.DisposeAsync();
-        await _upstream.DisposeAsync();
-        _rawUpstream.Stop();
+        if (_upstream is not null)
+            await _upstream.DisposeAsync();
+        _rawUpstream?.Stop();
         System.IO.Directory.Delete(Directory, recursive: true);
     }
 
