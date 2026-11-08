@@ -63,8 +63,10 @@ must be absolute: `~` is not expanded, and a whitelist path that does not exist 
 everything without any error being logged.  Misspelt settings are silently ignored as well.
 
 ```
-dotnet src/Charon/bin/Release/net10.0/Charon.dll --contentRoot ~/.config/charon
+out/publish/Charon/release_linux-x64/charon --contentRoot ~/.config/charon
 ```
+
+That is the executable compiled ahead of time, by `dotnet publish src/Charon -c Release`.
 
 Credentials go in `~/.config/charon/credentials.json`, which also needs `chmod 600`.
 There must be two entries.  The REST API and git are at different origins, and git
@@ -100,6 +102,7 @@ uses Basic authentication where the API uses Bearer tokens:
 
 `appId` is a string and `installationId` is a number.  The IDs above are placeholders.
 The optional `repositories` and `permissions` make tokens narrower than the installation.
+They can be narrowed further for each agent, in `~/.config/charon/users.json`.
 
 In the sandbox:
 
@@ -204,7 +207,11 @@ so they are worth allowing for any agent working on CI.
     workflow should not be able to read.
   - **`POST /graphql`.**  One URL can do nearly anything that the token permits, so URL rules
     cannot restrict it.  It should stay off the whitelist for any agent that has a credential.
-  - **Separation between sandboxes.**  Charon cannot yet tell its clients apart, so any
-    client of an instance gets its credentials.  For now, run one instance per level of trust.
+  - **Separation between sandboxes, beyond credentials.**  Charon can tell its clients apart,
+    by a password or by the Unix domain socket they connect to, and give each one tokens for
+    only some repositories: see "Proxy users" in `README.md`.  But the whitelist is the same
+    for all of them, and clients that do not identify themselves get the credentials as
+    they are in `credentials.json`, unless `RequireProxyAuthentication` is set.  To keep
+    an agent from even reading something that another may, run another instance.
   - **Endpoints that echo headers.**  A URL covered by a credential that reflects request
     headers would show the token to the agent.
