@@ -61,7 +61,7 @@ internal static partial class ListenAddresses
                 throw new InvalidOperationException($"In the setting {setting}: {e.Message}");
             }
 
-            if (!seen.Add(endPoint.ToString()!))
+            if (!seen.Add(Key(endPoint)))
                 throw new InvalidOperationException($"In the setting {setting}: \"{text}\" is listened on already.");
             return endPoint;
         }).ToArray();
@@ -83,6 +83,12 @@ internal static partial class ListenAddresses
 
         kestrel.Listen(endPoint, configure);
     }
+
+    /// <summary>
+    /// The same for all ways of writing an address, such as "[::1]" and "[0::1]", so that
+    /// addresses can be compared: for paths, that is only as they are written.
+    /// </summary>
+    public static string Key(EndPoint endPoint) => endPoint.ToString()!;
 
     /// <summary>How a client is shown in the traffic log.</summary>
     public static string NameOfClient(EndPoint? endPoint) => endPoint is IPEndPoint ip ? ip.ToString() : "unix";
