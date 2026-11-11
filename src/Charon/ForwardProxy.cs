@@ -240,28 +240,40 @@ internal sealed class ForwardProxy
     /// request or the request line, but not from the Host header which is not trusted:
     /// if it disagrees the request is refused, or else a client could reach
     /// other sites hosted at a whitelisted server (domain fronting).
+    /// <para>
+    /// The path is taken as the client sent it, not from <see cref="HttpRequest.Path"/>:
+    /// that has <c>%2F</c> left encoded but <c>%25</c> decoded, so that it cannot tell
+    /// <c>%2F</c> apart from <c>%252F</c>.  <see cref="Uri"/> then normalizes it, decoding 
+    /// only what does not change its meaning, and resolving dot segments.
+    /// </para>
     /// </remarks>
     private static Uri? GetDestination(HttpContext context, Tunnel? tunnel, out string? problem)
     {
         var request = context.Request;
-        string scheme;
+        var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget ?? "";
+        string schemePart;
         Authority target;
+        string pathAndQuery;
 
         if (tunnel is not null)
         {
-            scheme = "https";
+            schemePart = "https://";
             target = tunnel.Target;
+
+            // Otherwise, it is the absolute form, whose authority does not matter as the tunnel
+            // decides the host, or the asterisk form, which has no path.
+            pathAndQuery = rawTarget.StartsWith('/') ? rawTarget : GetPathAndQuery(rawTarget);
         }
         else
         {
-            var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget ?? "";
-            if (!rawTarget.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            const string HttpScheme = "http://";
+            if (!rawTarget.StartsWith(HttpScheme, StringComparison.OrdinalIgnoreCase))
             {
                 problem = "This is a proxy: requests must be sent with an absolute http:// URL, or CONNECT.";
                 return null;
             }
 
-            int start = "http://".Length;
+            int start = HttpScheme.Length;
             int end = rawTarget.AsSpan(start).IndexOfAny('/', '?', '#');
             var authorityText = end < 0 ? rawTarget[start..] : rawTarget.Substring(start, end);
             if (!Authority.TryParse(authorityText, defaultPort: 80, out target))
@@ -270,7 +282,8 @@ internal sealed class ForwardProxy
                 return null;
             }
 
-            scheme = "http";
+            schemePart = HttpScheme;
+            pathAndQuery = end < 0 ? "" : rawTarget[(start + end)..];
         }
 
         int defaultPort = tunnel is not null ? 443 : 80;
@@ -281,9 +294,28 @@ internal sealed class ForwardProxy
             return null;
         }
 
+        // A fragment is not for the server, and Uri would put it into the URL that the whitelist sees.
+        int fragment = pathAndQuery.IndexOf('#');
+        if (fragment >= 0)
+            pathAndQuery = pathAndQuery[..fragment];
+        var headSlash = pathAndQuery.StartsWith('/') ? "" : "/";
+
         problem = null;
-        return RequestUtilities.MakeDestinationAddress(
-            $"{scheme}://{target.UrlHost}:{target.Port}", request.Path, request.QueryString);
+        return new Uri($"{schemePart}{target.UrlHost}:{target.Port}{headSlash}{pathAndQuery}");
+    }
+
+    /// <summary>Gets the part of an absolute URL after its authority.</summary>
+    private static string GetPathAndQuery(string url)
+    {
+        const string SchemeSeparator = "://";
+
+        int scheme = url.IndexOf(SchemeSeparator, StringComparison.Ordinal);
+        if (scheme < 0)
+            return "";
+
+        int start = scheme + SchemeSeparator.Length;
+        int end = url.AsSpan(start).IndexOfAny('/', '?', '#');
+        return end < 0 ? "" : url[(start + end)..];
     }
 
     private sealed class FixedDestination(Uri destination, string? credentialHeader, string? credentialValue)

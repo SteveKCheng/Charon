@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Data.Sqlite;
 
@@ -30,7 +31,7 @@ public sealed class Harness : IAsyncLifetime
     public int RawPort { get; private set; }
     public int RawConnections;
 
-    /// <summary>Paths of all requests that arrived at the upstream server.</summary>
+    /// <summary>Paths of all requests that arrived at the upstream server, exactly as sent.</summary>
     public List<string> UpstreamRequests { get; } = new();
 
     public string WhitelistFile => Path.Combine(Directory, "whitelist.txt");
@@ -324,7 +325,7 @@ public sealed class Harness : IAsyncLifetime
         app.Use(async (context, next) =>
         {
             lock (UpstreamRequests)
-                UpstreamRequests.Add(context.Request.Path + context.Request.QueryString);
+                UpstreamRequests.Add(context.Features.Get<IHttpRequestFeature>()!.RawTarget);
             await next(context);
         });
 

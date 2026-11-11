@@ -143,13 +143,28 @@ public sealed class RequestPolicyTests(Harness h)
 
     [Theory]
     [InlineData("/allowed/@scope%2Fpackage")]
+    [InlineData("/allowed/@scope%2fpackage")]
     [InlineData("/allowed/projects/group%2Fsubgroup%2Fname")]
     [InlineData("/allowed/file..name")]
     [InlineData("/allowed/...")]
     [InlineData("/allowed/a..%2Fb")]
+    [InlineData("/allowed/100%25")]
+    [InlineData("/allowed/a%252Fb")]
     public async Task LegitimateEncodingsAndDotsPass(string path)
     {
         await SendInTunnelAsync($"GET {path} HTTP/1.1\r\n{Headers}\r\n");
+        Assert.True(h.UpstreamSaw(path));
+    }
+
+    [Theory]
+    [InlineData("/allowed/@scope%2fpackage")]
+    [InlineData("/allowed/a%252Fb?q=%2f")]
+    public async Task PlainRequestsKeepTheirEncoding(string path)
+    {
+        await using var stream = await h.ConnectRawAsync();
+        await Harness.ExchangeAsync(stream,
+            $"GET http://localhost:{h.HttpPort}{path} HTTP/1.1\r\n" +
+            $"Host: localhost:{h.HttpPort}\r\nConnection: close\r\n\r\n");
         Assert.True(h.UpstreamSaw(path));
     }
 
