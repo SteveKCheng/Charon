@@ -121,6 +121,7 @@ public static class CharonApp
             inheritSockets(services.GetRequiredService<ILoggerFactory>().CreateLogger<InheritedSockets>()));
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.TypeInfoResolverChain.Insert(0, CharonAppJsonContext.Default));
+        builder.Services.AddSystemdEx();
 
         if (options.TrafficDatabaseFile.Length > 0)
         {

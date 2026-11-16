@@ -16,6 +16,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.15" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <EmbeddedResource Include="index.html" LogicalName="index.html" />
     <InternalsVisibleTo Include="Charon.Tests" />
