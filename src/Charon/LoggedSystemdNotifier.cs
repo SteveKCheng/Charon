@@ -32,8 +32,37 @@ internal static class HostBuilderExtensions
             targetPid != Environment.ProcessId)
             return services;
 
-        services.AddSingleton<ISystemdNotifier, SystemdNotifier>();
+        services.AddSingleton<ISystemdNotifier, LoggedSystemdNotifier>();
         services.AddSingleton<IHostLifetime, SystemdLifetime>();
         return services;
     }
+}
+
+/// <summary>
+/// Wrapper around <see cref="SystemdNotifier" /> to log whenever notification are made. 
+/// </summary>
+internal sealed partial class LoggedSystemdNotifier : ISystemdNotifier
+{
+    private readonly SystemdNotifier _underlyingNotifier = new();
+    private readonly ILogger _logger;
+
+    /// <summary>
+    /// Wraps an internally constructed <see cref="SystemdNotifier" /> with logging.
+    /// </summary>
+    /// <param name="logger">Where the log messages go to. </param>
+    public LoggedSystemdNotifier(ILogger<LoggedSystemdNotifier> logger) => _logger = logger;
+
+    public void Notify(ServiceState state)
+    {
+        if (IsEnabled)
+        {
+            LogNotification(state.ToString());
+            _underlyingNotifier.Notify(state);
+        }
+    }
+
+    [LoggerMessage(EventId = 0, Level = LogLevel.Information, Message = "Sending systemd notification: {Message}")]
+    private partial void LogNotification(string message);
+
+    public bool IsEnabled => _underlyingNotifier.IsEnabled;
 }
