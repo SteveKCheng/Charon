@@ -8,6 +8,8 @@
     <PublishAot>true</PublishAot>
     <PublishSingleFile>true</PublishSingleFile>
     <TargetName Condition="'$(_IsPublishing)' == 'true'">charon</TargetName>
+    <!-- Work around .NET 11 SDK bug: https://github.com/dotnet/sdk/issues/56656 -->
+    <EnableHotReloadInRuntimeConfigDevFile Condition="$(NETCoreSdkVersion.StartsWith('11.0.100'))">false</EnableHotReloadInRuntimeConfigDevFile>
   </PropertyGroup>
 
   <ItemGroup>
