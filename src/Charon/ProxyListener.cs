@@ -51,8 +51,8 @@ internal static class ProxyListener
 
     private static readonly TimeSpan FirstRequestTimeout = TimeSpan.FromSeconds(30);
 
-    private static readonly ReadOnlyMemory<byte> ConnectPrefix = "CONNECT "u8.ToArray();
-    private static readonly byte[] EndOfHead = "\r\n\r\n"u8.ToArray();
+    private static ReadOnlySpan<byte> ConnectPrefix => "CONNECT "u8;
+    private static ReadOnlySpan<byte> EndOfHead => "\r\n\r\n"u8;
 
     private static readonly ReadOnlyMemory<byte> Established =
         "HTTP/1.1 200 Connection established\r\n\r\n"u8.ToArray();
@@ -232,9 +232,12 @@ internal static class ProxyListener
     }
 
     /// <summary>
-    /// Reads the head of a CONNECT request from the start of a connection, leaving behind
-    /// what comes after it.  If the connection begins with something else, returns null with
-    /// nothing consumed.
+    /// Reads the <c>CONNECT</c> request (including HTTP headers) from the start of a connection, 
+    /// if there is one.
+    /// </summary>
+    /// <remarks>
+    /// This method will leave leave behind what comes after the <c>CONNECT</c> request.
+    /// If the connection begins with something else, returns null with nothing consumed.
     /// </summary>
     private static async Task<string?> ReadConnectHeadAsync(ConnectionContext connection,
                                                             CancellationToken cancellationToken)
@@ -247,8 +250,23 @@ internal static class ProxyListener
             var buffer = result.Buffer;
             var reader = new SequenceReader<byte>(buffer);
 
-            int prefixLength = (int)Math.Min(buffer.Length, ConnectPrefix.Length);
-            if (!buffer.Slice(0, prefixLength).ToArray().AsSpan().SequenceEqual(ConnectPrefix.Span[..prefixLength]))
+            static bool MatchesConnectPrefix(ReadOnlySequence<byte> buffer)
+            {
+                int prefixLength = (int)Math.Min(buffer.Length, ConnectPrefix.Length);
+
+                // We need to copy "buffer" to "shortBuffer" for this byte-wise comparison
+                // because the former is a ReadOnlySequence<byte> that does not support
+                // SequenceEqual against ReadOnlySpan<byte>.  And then, this code must
+                // be put in a separate (inner) function because stackalloc is not allowed
+                // across suspension points in an asynchronous method.
+                Span<byte> shortBuffer = stackalloc byte[prefixLength];
+                buffer.Slice(0, prefixLength).CopyTo(shortBuffer);
+
+                // Note: HTTP request methods are case-sensitive (RFC 9112 §3.1).
+                return shortBuffer.SequenceEqual(ConnectPrefix[..prefixLength]);
+            }
+
+            if (!MatchesConnectPrefix(buffer))
             {
                 // Not "AdvanceTo(start, end)": the next reader must get this data straight away.
                 input.AdvanceTo(buffer.Start);
