@@ -130,16 +130,41 @@ internal static class ProxyListener
     public static IClientAuthenticator GetAuthenticator(IFeatureCollection features) =>
         (IClientAuthenticator)features.Get<IConnectionItemsFeature>()!.Items[typeof(IClientAuthenticator)]!;
 
-    /// <summary>Gets a header from the head of a request, as text.</summary>
-    private static string? FindHeader(string head, string name)
+    /// <summary>
+    /// Gets the field value corresponding to a field name in a HTTP request header. 
+    /// </summary>
+    /// <param name="request">
+    /// Buffer containing the HTTP request line and headers, converted to UTF-16.
+    /// </param>
+    /// <param name="fieldName">
+    /// The name of the field to look for. 
+    /// </param>
+    /// <returns>
+    /// The value of the first field found whose name matches <paramref name="fieldName" />,
+    /// or null if there is no such field.  Whitespace is trimmed.
+    /// </returns>
+    private static string? FindHeader(ReadOnlySpan<char> request, ReadOnlySpan<char> fieldName)
     {
-        foreach (var line in head.Split("\r\n"))
+        while (!request.IsEmpty)
         {
-            if (line.StartsWith(name, StringComparison.OrdinalIgnoreCase) &&
-                line.Length > name.Length && line[name.Length] == ':')
-            {
-                return line[(name.Length + 1)..].Trim();
-            }
+            // Field line ends on CRLF or end of buffer
+            const string lineTerminator = "\r\n";
+            int lineEndIndex = request.IndexOf(lineTerminator);
+            var line = lineEndIndex < 0 ? request : request[..lineEndIndex];
+            request = lineEndIndex < 0 ? default : request[(lineEndIndex + lineTerminator.Length)..];
+
+            // Separator between field name and value.
+            // If there is no field value, ignore this line.
+            var nameEndIndex = line.IndexOf(':');
+            if (nameEndIndex < 0)
+                continue;
+
+            // From RFC 9112 §5 and RFC 9110 §5.6.3:
+            //   field-line = field-name ":" OWS field-value OWS 
+            //   OWS        = *( SP / HTAB )
+            var currentName = line[0..nameEndIndex];
+            if (currentName.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
+                return line[(nameEndIndex + 1)..].Trim(" \t").ToString();
         }
 
         return null;
