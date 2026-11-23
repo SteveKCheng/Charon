@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Security;
 using System.Text;
 using Microsoft.AspNetCore.Connections;
@@ -192,9 +193,27 @@ internal static class ProxyListener
             return;
         }
 
-        var requestLine = head.AsSpan(0, head.IndexOf('\r')).ToString().Split(' ');
-        if (requestLine is not ["CONNECT", var target, "HTTP/1.1" or "HTTP/1.0"] ||
-            !Authority.TryParse(target, defaultPort: 0, out var authority))
+        // Parse for "CONNECT authority-form http-version"
+        static bool TryParseConnectRequest(ReadOnlySpan<char> line, out Authority authority)
+        {
+            authority = default;
+            Span<Range> ranges = stackalloc Range[4];
+            if (line.Split(ranges, ' ', StringSplitOptions.None) != 3)
+                return false;
+
+            var request = line[ranges[0]];
+            var target = line[ranges[1]];
+            var httpVersion = line[ranges[2]];
+
+            if (!(request is "CONNECT")) 
+                return false;
+            if (!(httpVersion is "HTTP/1.1" || httpVersion is "HTTP/1.0")) 
+                return false;
+
+            return Authority.TryParse(target, defaultPort: 0, out authority);
+        }
+
+        if (!TryParseConnectRequest(head.AsSpan(0, head.IndexOf('\r')), out var authority))
         {
             await connection.Transport.Output.WriteAsync(BadRequest);
             return;
@@ -236,9 +255,14 @@ internal static class ProxyListener
     /// if there is one.
     /// </summary>
     /// <remarks>
-    /// This method will leave leave behind what comes after the <c>CONNECT</c> request.
-    /// If the connection begins with something else, returns null with nothing consumed.
-    /// </summary>
+    /// <para>
+    /// This method will leave behind what comes after the <c>CONNECT</c> request, following the
+    /// <see cref="EndOfHead" /> terminator of the HTTP headers.
+    /// </para>
+    /// <para>
+    /// If the connection begins with something else, this method returns null, consuming nothing.
+    /// </para>
+    /// </remarks>
     private static async Task<string?> ReadConnectHeadAsync(ConnectionContext connection,
                                                             CancellationToken cancellationToken)
     {
@@ -277,7 +301,7 @@ internal static class ProxyListener
             {
                 if (head.Length > MaxConnectHeadLength)
                     throw new InvalidDataException();
-
+                
                 var text = Encoding.Latin1.GetString(head) + "\r\n";
                 input.AdvanceTo(reader.Position);
                 return text;
