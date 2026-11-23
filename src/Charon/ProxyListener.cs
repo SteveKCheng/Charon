@@ -68,14 +68,34 @@ internal static class ProxyListener
         $"Proxy-Authenticate: {ProxyAuthenticateChallenge}\r\n" +
         "Content-Length: 0\r\nConnection: close\r\n\r\n");
 
+    /// <summary>
+    /// Sets up this proxy as connection middleware for Kestrel.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Kestrel's connection middleware is distinct from ASP.NET Core's HTTP middleware.
+    /// The former handles the raw byte stream from accepting a connection; 
+    /// the latter handles parsing of HTTP requests.
+    /// </para>
+    /// <para>
+    /// None of Kestrel, ASP.NET Core or YARP supports the <c>CONNECT</c> requests required
+    /// for proxying HTTPS URLs, so this middleware must set up Kestrel to let our own
+    /// middleware to switch the stream to HTTPS upon receiving <c>CONNECT</c>.
+    /// </para>
+    /// </remarks>
     public static void Configure(ListenOptions listenOptions, CertificateAuthority ca, TrafficLog log,
                                  IClientAuthenticator authenticator)
     {
         ConnectionDelegate? httpPipeline = null;
 
-        listenOptions.Use(tlsPipeline => connection =>
-            HandleConnectionAsync(connection, tlsPipeline, httpPipeline!, log, authenticator));
+        // Middleware ①: contains our proxying logic.  
+        // If a CONNECT request is seen, our proxy defers to (invokes) httpsPipeline;
+        // all other requests go to httpPipeline.
+        listenOptions.Use(httpsPipeline => connection =>
+            HandleConnectionAsync(connection, httpsPipeline, httpPipeline!, log, authenticator));
 
+        // Middleware ②: sets up the HTTPS handler from Kestrel, which appears as 
+        // httpsPipeline in middleware ①.
         listenOptions.UseHttps(new TlsHandshakeCallbackOptions
         {
             OnConnection = context =>
@@ -92,8 +112,9 @@ internal static class ProxyListener
             },
         });
 
-        // Middleware is composed last to first, so this
-        // runs before the connection delegate above can be called.
+        // This middleware ③ is only to capture the middleware ④ above us, which is
+        // expected to be the regular HTTP handler from Kestrel, to pass into 
+        // middleware ①, as httpPipeline.
         listenOptions.Use(next => httpPipeline = next);
     }
 
@@ -124,8 +145,18 @@ internal static class ProxyListener
         return null;
     }
 
+    /// <summary>
+    /// Delegates handling of a connection to HTTP or HTTPS,
+    /// depending on the presence of a <c>CONNECT</c> request.
+    /// </summary>
+    /// <param name="connection">The current connection to handle. </param>
+    /// <param name="httpsPipeline">HTTPS handler (from Kestrel). </param>
+    /// <param name="httpPipeline">HTTP handler (from Kestrel). </param>
+    /// <param name="log">For logging unauthorized <c>CONNECT</c> requests. </param>
+    /// <param name="authenticator">Used to check for unauthorized requests
+    /// for the current connection. </param>
     private static async Task HandleConnectionAsync(ConnectionContext connection,
-                                                    ConnectionDelegate tlsPipeline,
+                                                    ConnectionDelegate httpsPipeline,
                                                     ConnectionDelegate httpPipeline,
                                                     TrafficLog log,
                                                     IClientAuthenticator authenticator)
@@ -188,7 +219,7 @@ internal static class ProxyListener
         connection.Items[typeof(Tunnel)] = tunnel;
         await connection.Transport.Output.WriteAsync(Established);
 
-        await tlsPipeline(connection);
+        await httpsPipeline(connection);
 
         // Otherwise a client failing to get through, say because it pins
         // certificates or is not speaking HTTP, would not show up anywhere.
