@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Diagnostics.CodeAnalysis;
 using System.Net.Security;
 using System.Text;
 using Microsoft.AspNetCore.Connections;
@@ -254,15 +253,24 @@ internal static class ProxyListener
     /// Reads the <c>CONNECT</c> request (including HTTP headers) from the start of a connection, 
     /// if there is one.
     /// </summary>
-    /// <remarks>
+    /// <param name="connection">
+    /// The HTTP connection to read from to look for a <c>CONNECT</c> request.  If found, the entirety
+    /// of the request, including the <see cref="EndOfHead" /> terminator, will be consumed from
+    /// the connection.  Otherwise, nothing is consumed from the connection. 
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Can be used to cancel the asynchronous reading from the HTTP connection. 
+    /// </param>
+    /// <returns>
     /// <para>
-    /// This method will leave behind what comes after the <c>CONNECT</c> request, following the
-    /// <see cref="EndOfHead" /> terminator of the HTTP headers.
-    /// </para>
+    /// If a HTTP <c>CONNECT</c> request is present at the current position in <paramref name="connection" />,
+    /// the returned string will include the request line, plus all of the HTTP headers, including the
+    /// <see cref="EndOfHead" /> terminator at the end.
+    /// </para> 
     /// <para>
-    /// If the connection begins with something else, this method returns null, consuming nothing.
+    /// If there is no <c>CONNECT</c> request, the returned value is null.
     /// </para>
-    /// </remarks>
+    /// </returns>
     private static async Task<string?> ReadConnectHeadAsync(ConnectionContext connection,
                                                             CancellationToken cancellationToken)
     {
@@ -272,7 +280,6 @@ internal static class ProxyListener
         {
             var result = await input.ReadAsync(cancellationToken);
             var buffer = result.Buffer;
-            var reader = new SequenceReader<byte>(buffer);
 
             static bool MatchesConnectPrefix(ReadOnlySequence<byte> buffer)
             {
@@ -290,27 +297,49 @@ internal static class ProxyListener
                 return shortBuffer.SequenceEqual(ConnectPrefix[..prefixLength]);
             }
 
-            if (!MatchesConnectPrefix(buffer))
+            bool isAdvanced = false;
+            try
             {
-                // Not "AdvanceTo(start, end)": the next reader must get this data straight away.
-                input.AdvanceTo(buffer.Start);
-                return null;
-            }
+                // Quit as soon as we see anything that cannot begin a CONNECT request.
+                if (!MatchesConnectPrefix(buffer))
+                    return null;
 
-            if (reader.TryReadTo(out ReadOnlySequence<byte> head, EndOfHead, advancePastDelimiter: true))
-            {
-                if (head.Length > MaxConnectHeadLength)
-                    throw new InvalidDataException();
+                // Examine the currently read bytes to the end of HTTP headers.
+                // Note that TryReadTo returning success here implies that the entire ConnectPrefix
+                // string matched, and not just ConnectPrefix[..prefixLength] above.
+                var reader = new SequenceReader<byte>(buffer);
+                if (reader.TryReadTo(out ReadOnlySequence<byte> head, EndOfHead, advancePastDelimiter: true))
+                {
+                    if (head.Length > MaxConnectHeadLength)
+                        throw new InvalidDataException();
+
+                    // TryReadTo above advances past the delimiter string, but does not include it
+                    // in the output.  We do want to include it though.
+                    head = buffer.Slice(buffer.Start, reader.Position);
+                    var text = Encoding.Latin1.GetString(head);
+
+                    // Consider all of the bytes of the CONNECT request consumed, in the underlying "input". 
+                    input.AdvanceTo(reader.Position);
+                    isAdvanced = true;
                 
-                var text = Encoding.Latin1.GetString(head) + "\r\n";
-                input.AdvanceTo(reader.Position);
-                return text;
+                    return text;
+                }
+
+                if (buffer.Length > MaxConnectHeadLength || result.IsCompleted)
+                    throw new InvalidDataException();
+
+                // Do not consume anything (yet), but wake up the next call to ReadAsync
+                // only when there are more bytes beyond the prefix we have examined so far.
+                input.AdvanceTo(buffer.Start, buffer.End);
+                isAdvanced = true;
             }
-
-            if (buffer.Length > MaxConnectHeadLength || result.IsCompleted)
-                throw new InvalidDataException();
-
-            input.AdvanceTo(buffer.Start, buffer.End);
+            finally
+            {
+                // PipeReader requires that we mark the read operation as complete,
+                // even if we consume or process nothing. 
+                if (!isAdvanced)
+                    input.AdvanceTo(buffer.Start);
+            }
         }
     }
 }
