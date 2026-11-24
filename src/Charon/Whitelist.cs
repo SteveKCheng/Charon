@@ -41,6 +41,7 @@ internal readonly record struct WhitelistDecision(WhitelistRule? Rule, string Ve
 /// <para>
 /// Beyond the add-in's format, there are the rule types <c>GET-BODY</c> and
 /// <c>WEBSOCKET</c>, for what a <c>GET</c> rule no longer grants: see <see cref="Capability"/>.
+/// There is also <c>TCP</c>, for tunnels: see <see cref="TcpForwarder"/>.
 /// </para>
 /// </remarks>
 internal sealed class Whitelist : IDisposable
@@ -52,7 +53,7 @@ internal sealed class Whitelist : IDisposable
 
     /// <summary>Matches the prefix of a rule that gives its host name literally.</summary>
     private static readonly Regex LiteralHostRule = new(
-        @"^\^https\??://(?:\((?:\?:)?\[-a-z0-9\.\]\+\\\.\)\?)?(?<host>(?:[-a-z0-9_]|\\\.)+)(?:[/:$]|\\/|$)",
+        @"^\^(?:https\??|tcp)://(?:\((?:\?:)?\[-a-z0-9\.\]\+\\\.\)\?)?(?<host>(?:[-a-z0-9_]|\\\.)+)(?:[/:$]|\\/|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private sealed record CompiledRule(Regex Regex, WhitelistRule Source);
@@ -95,6 +96,42 @@ internal sealed class Whitelist : IDisposable
         Replace(new Snapshot(rules, WhitelistVersion.Of(contents)));
         _logger?.LogInformation("Loaded {Count} rules from {Path}, of which {Unindexed} are not indexed by host",
                                 count, path, unindexed);
+        WarnOfBypass(rules);
+    }
+
+    /// <summary>
+    /// Logs a warning for rules that let tunnels bypass the rules for HTTPS.  This can only
+    /// go by the hosts that those rules give literally, and the usual port.
+    /// </summary>
+    private void WarnOfBypass(RuleSet[] sets)
+    {
+        if (_logger is null)
+            return;
+
+        var tcp = sets[(int)Capability.Tcp];
+        var tcpRules = tcp.Unindexed.Concat(tcp.ByHost.Values.SelectMany(bucket => bucket)).ToArray();
+        if (tcpRules.Length == 0)
+            return;
+
+        var hosts = sets.Where(set => set != tcp).SelectMany(set => set.ByHost)
+                        .Where(pair => pair.Value.Any(rule => !rule.Regex.ToString().StartsWith("^http://", StringComparison.OrdinalIgnoreCase)))
+                        .Select(pair => pair.Key).Distinct().ToArray();
+
+        foreach (var rule in tcpRules)
+        {
+            try
+            {
+                if (hosts.FirstOrDefault(host => rule.Regex.IsMatch($"tcp://{host}:443/")) is { } host)
+                {
+                    _logger.LogWarning("The TCP rule at line {Line} of the whitelist covers {Host}:443, " +
+                                       "so the rules for https://{Host}/ can be bypassed", rule.Source.Line, host, host);
+                }
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                // Requests that this happens for are denied.
+            }
+        }
     }
 
     private void Replace(Snapshot snapshot)
@@ -180,11 +217,21 @@ internal sealed class Whitelist : IDisposable
                 "ANY" => [Capability.Get, Capability.Post, Capability.Put],
                 "GET-BODY" => [Capability.GetWithBody],
                 "WEBSOCKET" => [Capability.WebSocket],
+                "TCP" => [Capability.Tcp],
                 _ => null,
             };
             var pattern = line[(colon + 1)..].Trim();
             if (methods is null || pattern.Length == 0)
                 throw new FormatException($"Invalid rule at line {i + 1}");
+
+            // Tunnels are not checked any further, so mistakes are worse than they are for other rules.
+            // Without the slash at the end, a rule for port 22 would also allow 2222.
+            if (methods is [Capability.Tcp] &&
+                !(pattern.StartsWith("^tcp://", StringComparison.OrdinalIgnoreCase) &&
+                  (pattern.EndsWith('/') || pattern.EndsWith("/$")) && !HasTopLevelAlternation(pattern)))
+            {
+                throw new FormatException($"TCP rule at line {i + 1} must be of the form ^tcp://host:port/$");
+            }
 
             CompiledRule rule;
             try

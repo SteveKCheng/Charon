@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Http.Features;
 namespace Charon;
 
 /// <summary>What a rule of the whitelist can grant.</summary>
-internal enum Capability { Get, Post, Put, GetWithBody, WebSocket, Count }
+internal enum Capability { Get, Post, Put, GetWithBody, WebSocket, Tcp, Count }
 
 /// <summary>
 /// Rejects requests that say one thing in the parts that the whitelist looks at, while
@@ -54,6 +54,7 @@ internal static class RequestPolicy
         Capability.Put => "PUT",
         Capability.GetWithBody => "GET-BODY",
         Capability.WebSocket => "WEBSOCKET",
+        Capability.Tcp => "TCP",
         _ => throw new ArgumentOutOfRangeException(nameof(capability)),
     };
 

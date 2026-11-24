@@ -27,6 +27,7 @@ public sealed class WhitelistTests : IDisposable
     [InlineData(@"^https?://localhost:[0-9]+/", "localhost")]
     [InlineData(@"^https://a\.b/x(y|z)$", "a.b")]
     [InlineData(@"^https://a\.b$", "a.b")]
+    [InlineData(@"^tcp://a\.b:22/$", "a.b")]
     [InlineData(@"^https://example.com/", null)]             // "." here is any character
     [InlineData(@"^https://a\.b/|^https://c\.d/", null)]     // Not all matches have a.b
     [InlineData(@"^https://a\.b/x|y", null)]
@@ -78,6 +79,53 @@ public sealed class WhitelistTests : IDisposable
 
         Assert.True(list.IsAllowed(Capability.WebSocket, "https://c.test/", "c.test"));
         Assert.False(list.IsAllowed(Capability.Get, "https://c.test/", "c.test"));
+    }
+
+    [Fact]
+    public void TcpRulesAreSeparateFromAllOthers()
+    {
+        using var list = Load(@"ANY: .*", @"TCP: ^tcp://a\.test:22/$", @"TCP: ^tcp://.*\.b\.test:(22|23)/");
+
+        Assert.True(list.IsAllowed(Capability.Tcp, "tcp://a.test:22/", "a.test"));
+        Assert.True(list.IsAllowed(Capability.Tcp, "tcp://x.b.test:23/", "x.b.test"));
+        Assert.False(list.IsAllowed(Capability.Tcp, "tcp://a.test:2222/", "a.test"));
+        Assert.False(list.IsAllowed(Capability.Tcp, "tcp://x.a.test:22/", "x.a.test"));
+        Assert.False(list.IsAllowed(Capability.Tcp, "tcp://c.test:22/", "c.test"));
+
+        using var tcpOnly = Load(@"TCP: ^tcp://.*/$");
+        Assert.False(tcpOnly.IsAllowed(Capability.Get, "https://a.test/", "a.test"));
+    }
+
+    [Theory]
+    [InlineData(@"tcp://a\.test:22/")]
+    [InlineData(@".*")]
+    [InlineData(@"^https://a\.test/")]
+    [InlineData(@"^tcp://a\.test:22")]
+    [InlineData(@"^tcp://a\.test:22$")]
+    [InlineData(@"^tcp://a\.test:22/|.*/")]
+    public void LooseTcpRulesMakeTheWhitelistInvalid(string pattern)
+    {
+        using var list = Load(@"GET: ^https://x\.test/", "TCP: " + pattern);
+        Assert.False(Allowed(list, "GET", "https://x.test/"));
+        Assert.False(list.IsAllowed(Capability.Tcp, "tcp://a.test:22/", "a.test"));
+    }
+
+    [Theory]
+    [InlineData(@"^tcp://a\.test:443/$", true)]
+    [InlineData(@"^tcp://.*/$", true)]
+    [InlineData(@"^tcp://a\.test:22/$", false)]
+    [InlineData(@"^tcp://b\.test:443/$", false)]
+    [InlineData(@"^tcp://plain\.test:443/$", false)]
+    public void TcpRulesThatBypassOthersAreWarnedAbout(string pattern, bool expected)
+    {
+        File.WriteAllLines(_path, [@"GET: ^https://a\.test/", @"GET: ^http://plain\.test/", "TCP: " + pattern]);
+        var logger = new ListLogger();
+        using var list = new Whitelist(_path, logger);
+
+        if (!expected)
+            Assert.Empty(logger.Warnings);
+        else
+            Assert.Contains("a.test:443", Assert.Single(logger.Warnings));
     }
 
     [Fact]

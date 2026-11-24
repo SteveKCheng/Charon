@@ -157,19 +157,50 @@ POST: ^https://github\.com/[^/]+/[^/]+(\.git)?/git-upload-pack$
 
 `GET` also covers `HEAD` and `OPTIONS`, `PUT` covers `PATCH` and `DELETE`, and `ANY` is all of these.
 
-Two more types of rule are for what those deliberately do not grant, and `ANY` does not include them:
+More types of rule are for what those deliberately do not grant, and `ANY` does not include them:
 
 ```
 # GET, HEAD or OPTIONS requests that have a body, as used by Elasticsearch
 GET-BODY: ^https://search\.example\.com/_search
 # WebSockets: matched against the https:// or http:// form of the URL
 WEBSOCKET: ^https://stream\.example\.com/events$
+# Any TCP connection: see below
+TCP: ^tcp://db\.example\.com:5432/$
 ```
 
 Patterns are .NET regular expressions, not PCRE.  Rules starting like the above are indexed
 by host name, so that the cost of matching does not grow with the length of the whitelist.
 The log says how many rules could not be indexed: these get run against every request.
 Write `\.` and not `.` in host names so that rules can be indexed.
+
+### TCP tunnels
+
+`TCP` rules allow tunnels with any data in them, for what is not HTTP.  They can be used by
+tools that can open tunnels with `CONNECT`, such as:
+
+```
+ncat --proxy 127.0.0.1:8080 --proxy-type http db.example.com 5432
+socat TCP-LISTEN:5432,bind=127.0.0.1,fork PROXY:127.0.0.1:db.example.com:5432,proxyport=8080
+ssh -o ProxyCommand='ncat --proxy 127.0.0.1:8080 --proxy-type http %h %p' example.com
+```
+
+Rules are matched against `tcp://host:port/`, where the port is always present.  They must start
+with `^tcp://`, end with `/` or `/$`, and not have `|` outside of parentheses.  Otherwise the
+whitelist is invalid.
+
+**Nothing in such a tunnel is checked, or recorded.**  The target being allowed is all there is to it:
+
+  - A `TCP` rule takes precedence for its host and port.  If it covers `github.com:443`, then all of
+    the rules for `https://github.com/` can be bypassed, and credentials are not added there.
+    Charon logs a warning when it notices this, but it cannot notice all cases.
+  - The rules are for all clients of the proxy, including anonymous ones if those are allowed.
+  - Host names are resolved by Charon, so `localhost` is the host it runs on and not the sandbox.
+    That is useful for reaching a service there, but be careful which.
+  - A tunnel that is open stays open if its rule, or its user, is removed.  Restart Charon to close it.
+  - There is no timeout for idle tunnels, which keep Charon from stopping when idle (`IdleTimeout`).
+    Once the client has finished sending, though, the server may be silent only for `ActivityTimeout`.
+  - When the server finishes sending, the tunnel closes, even if the client has not finished.
+  - They do not work with `UpstreamProxy`, and are refused with status 501.
 
 ## Requests that are always refused
 
@@ -361,6 +392,10 @@ SELECT contents FROM whitelists WHERE hash =
 | `no HTTP in tunnel` | The client never got to make a request: maybe it pins certificates, or is not speaking HTTP |
 | `wrong proxy credentials` | The user name or password of the proxy is not right |
 
+TCP tunnels have the method `CONNECT` and a URL like `tcp://host:port/`.  When they close, `note` tells
+how much data there was.  Their `status` is 200 if a connection was made, 502 if not, or 504 if
+that took too long.
+
 A request without a `status` never finished, because the proxy stopped while it was in progress.
 
 Requests are written in the background, within a moment of being made, so the database is
@@ -416,7 +451,8 @@ limit.  Under very heavy load they are dropped before anything else, which `gaps
 
   - URLs are built from where the request actually goes, not the `Host` header.
     A `Host` header that disagrees with the destination gets the request refused.
-  - Tunnels only carry HTTP in TLS.  Anything else, such as SSH over `CONNECT`, is dropped.
+  - Tunnels only carry HTTP in TLS.  Anything else, such as SSH over `CONNECT`, is dropped,
+    unless there is a `TCP` rule for it.
   - `GET` rules do not grant bodies or WebSockets, and some requests are always refused, as above.
 
 ## Versions

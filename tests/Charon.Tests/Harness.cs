@@ -31,6 +31,12 @@ public sealed class Harness : IAsyncLifetime
     public int HttpsPort { get; } = FreePort();
     public int UntrustedHttpsPort { get; } = FreePort();
 
+    /// <summary>Port that the whitelist allows TCP tunnels to on localhost, with nothing listening.</summary>
+    public int TcpPort { get; } = FreePort();
+
+    /// <summary>Address where the whitelist allows TCP tunnels to all ports.</summary>
+    public static readonly IPAddress TcpAddress = IPAddress.Parse("127.0.0.2");
+
     /// <summary>A TCP listener that counts connections and records what it is sent.</summary>
     public int RawPort { get; private set; }
     public int RawConnections;
@@ -51,6 +57,12 @@ public sealed class Harness : IAsyncLifetime
 
     /// <summary>Set before starting.</summary>
     public TimeSpan? IdleTimeout { get; init; }
+
+    /// <summary>Set before starting.</summary>
+    public TimeSpan ActivityTimeout { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Set before starting.</summary>
+    public string? UpstreamProxy { get; init; }
 
     /// <summary>Set before starting.</summary>
     public bool IdleTimeoutCountsWebUI { get; init; } = true;
@@ -156,6 +168,9 @@ public sealed class Harness : IAsyncLifetime
             ANY: ^https?://localhost:[0-9]+/api/
             ANY: ^https://127\.0\.0\.1:[0-9]+/api/
             GET: ^http://localhost:{UiPort}/
+            TCP: ^tcp://127\.0\.0\.2:[0-9]+/$
+            TCP: ^tcp://localhost:{TcpPort}/$
+            TCP: ^tcp://\[::1\]:{TcpPort}/$
             """);
 
         WriteCredentials();
@@ -194,6 +209,8 @@ public sealed class Harness : IAsyncLifetime
             RequireProxyAuthentication = RequireProxyAuthentication,
             TrafficHeaders = RecordHeaders,
             IdleTimeout = IdleTimeout,
+            ActivityTimeout = ActivityTimeout,
+            UpstreamProxy = UpstreamProxy,
             IdleTimeoutCountsWebUI = IdleTimeoutCountsWebUI,
         }, logger => new InheritedSockets(passed, names, logger));
         await _charon.StartAsync();

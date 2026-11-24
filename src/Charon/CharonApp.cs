@@ -48,6 +48,7 @@ public static class CharonApp
             var idleExit = kestrel.ApplicationServices.GetRequiredService<IdleExit>();
             var defaultAuthenticator = kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>();
             var forwardProxy = kestrel.ApplicationServices.GetRequiredService<ForwardProxy>(); 
+            var tcpForwarder = kestrel.ApplicationServices.GetRequiredService<TcpForwarder>();
 
             void ConfigureProxy(ListenOptions listen, bool isTls)
             {
@@ -67,7 +68,7 @@ public static class CharonApp
                 if (isTls)
                     ProxyListener.UseTlsToProxy(listen, ca, certificateNames);
 
-                ProxyListener.Configure(listen, ca, log, defaultAuthenticator, forwardProxy);
+                ProxyListener.Configure(listen, ca, log, defaultAuthenticator, forwardProxy, tcpForwarder);
             }
 
             var inherited = kestrel.ApplicationServices.GetRequiredService<InheritedSockets>();
@@ -128,6 +129,7 @@ public static class CharonApp
             options.ProxyUsersFile, options.RequireProxyAuthentication, services.GetRequiredService<CredentialStore>(),
             services.GetRequiredService<ILoggerFactory>().CreateLogger<ProxyUserStore>()));
         builder.Services.AddSingleton<ForwardProxy>();
+        builder.Services.AddSingleton<TcpForwarder>();
         builder.Services.AddSingleton<IConnectionListenerFactory, UserSocketListenerFactory>();
         builder.Services.AddSingleton<IConnectionListenerFactory, InheritedSocketListenerFactory>();
         builder.Services.AddSingleton<IdleExit>();

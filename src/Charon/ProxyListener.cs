@@ -58,8 +58,9 @@ internal sealed class Tunnel(Authority target, string? userName)
 /// the inside of a tunnel with this arrangement of connection middleware:
 /// </para>
 /// <code>
-///                 ┌─ "CONNECT ..." ──► Kestrel's TLS ─┐
-///   connection ───┤                                   ├──► Kestrel's HTTP/1.1, HTTP/2
+///                 ┌─ "CONNECT ...", with TCP rule ──► TcpForwarder
+///   connection ───┼─ "CONNECT ..." ──► Kestrel's TLS ─┐
+///                 │                                   ├──► Kestrel's HTTP/1.1, HTTP/2
 ///                 └─ anything else ───────────────────┘
 /// </code>
 /// <para>
@@ -67,6 +68,8 @@ internal sealed class Tunnel(Authority target, string? userName)
 /// decrypted traffic reaches the same HTTP stack and <see cref="ForwardProxy"/> as
 /// plain-text requests, with no extra hop.  Data in a tunnel that is not TLS, or not HTTP
 /// inside of TLS, is not understood and the connection gets dropped.  That is deliberate.
+/// The exception is if the whitelist has a TCP rule for the target of the tunnel:
+/// then its data is forwarded by <see cref="TcpForwarder"/> without being looked at.
 /// </para>
 /// </remarks>
 internal static class ProxyListener
@@ -109,7 +112,7 @@ internal static class ProxyListener
     /// </remarks>
     public static void Configure(ListenOptions listenOptions, CertificateAuthority ca, TrafficLog log,
                                  IClientAuthenticator authenticator,
-                                 ForwardProxy forwardProxy)
+                                 ForwardProxy forwardProxy, TcpForwarder tcpForwarder)
     {
         ConnectionDelegate? httpPipeline = null;
 
@@ -117,7 +120,7 @@ internal static class ProxyListener
         // If a CONNECT request is seen, our proxy defers to (invokes) httpsPipeline;
         // all other requests go to httpPipeline.
         listenOptions.Use(httpsPipeline => connection =>
-            HandleConnectionAsync(connection, httpsPipeline, httpPipeline!, log, authenticator, forwardProxy));
+            HandleConnectionAsync(connection, httpsPipeline, httpPipeline!, log, authenticator, forwardProxy, tcpForwarder));
 
         // Middleware ②: sets up the HTTPS handler from Kestrel, which appears as 
         // httpsPipeline in middleware ①.
@@ -264,12 +267,14 @@ internal static class ProxyListener
     /// can be readily distinguished from non-proxy connections (e.g. for the Web UI),
     /// and access <see cref="ForwardProxy" /> as a service. 
     /// </param> 
+    /// <param name="tcpForwarder">Handles the tunnels that the whitelist has a TCP rule for. </param>
     private static async Task HandleConnectionAsync(ConnectionContext connection,
                                                     ConnectionDelegate httpsPipeline,
                                                     ConnectionDelegate httpPipeline,
                                                     TrafficLog log,
                                                     IClientAuthenticator authenticator,
-                                                    ForwardProxy forwardProxy)
+                                                    ForwardProxy forwardProxy,
+                                                    TcpForwarder tcpForwarder)
     {
         connection.Features.Set<ForwardProxy>(forwardProxy);
 
@@ -341,6 +346,13 @@ internal static class ProxyListener
             }
 
             await connection.Transport.Output.WriteAsync(ProxyAuthenticationRequired);
+            return;
+        }
+
+        var tcpDecision = tcpForwarder.Evaluate(authority);
+        if (tcpDecision.Rule is { } tcpRule)
+        {
+            await tcpForwarder.ForwardAsync(connection, authority, userName, tcpRule, tcpDecision.Version, Established);
             return;
         }
 
