@@ -142,7 +142,7 @@ public static class CharonApp
         // would be no good: clients of the proxy can write anything in the Host header.
         app.Use((context, next) =>
             context.Features.Get<IConnectionItemsFeature>()?.Items.ContainsKey(typeof(ProxyListener)) == true
-                ? proxy.HandleAsync(context)
+                ? proxy.ProxyRequestAsync(context)
                 : next(context));
 
         app.MapGet("/", async context =>

@@ -72,7 +72,17 @@ internal sealed class ForwardProxy
         return new HttpMessageInvoker(handler);
     }
 
-    public async Task HandleAsync(HttpContext context)
+    /// <summary>
+    /// Forwards the current HTTP request from the proxy's client, if authenticated. 
+    /// </summary>
+    /// <param name="context">The HTTP connection between the proxy and the client. </param>
+    /// <remarks>
+    /// <para>
+    /// As noted in <see cref="ProxyListener" />, Kestrel and YARP do not natively support <c>CONNECT</c>
+    /// requests.  So those requests are handled there (in an outer layer) and not in this method.
+    /// </para>
+    /// </remarks>
+    public async Task ProxyRequestAsync(HttpContext context)
     {
         var tunnel = ProxyListener.GetTunnel(context.Features);
         if (tunnel is not null)
@@ -81,8 +91,9 @@ internal sealed class ForwardProxy
         var request = context.Request;
         var client = context.Connection.RemoteIpAddress is { } ip ? $"{ip}:{context.Connection.RemotePort}" : "unix";
 
-        // In a tunnel, this was settled by the CONNECT request.  Otherwise, unlike
-        // for a tunnel, every request on a connection stands on its own.
+        // If we're proxying on a CONNECT tunnel, authentication was already set up
+        // as part of the CONNECT request.  Otherwise (for non-tunneled requests),
+        // authentication must happen per HTTP request. 
         var userName = tunnel?.UserName;
         var isAuthenticated = tunnel is not null ||
             ProxyListener.GetAuthenticator(context.Features).TryAuthenticate(request.Headers.ProxyAuthorization, out userName);
