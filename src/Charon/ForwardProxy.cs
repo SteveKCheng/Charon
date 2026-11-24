@@ -84,7 +84,9 @@ internal sealed class ForwardProxy
     /// </remarks>
     public async Task ProxyRequestAsync(HttpContext context)
     {
-        var tunnel = ProxyListener.GetTunnel(context.Features);
+        // If this request is inside a CONNECT tunnel, retrieve the information about the tunnel
+        // that was saved in ProxyListener.HandleConnectionAsync.
+        var tunnel = context.Features.Get<Tunnel>(); 
         if (tunnel is not null)
             Interlocked.Increment(ref tunnel.RequestCount);
 

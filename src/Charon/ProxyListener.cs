@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
 using System.Text;
@@ -11,17 +12,38 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 namespace Charon;
 
-/// <summary>The target of a CONNECT request, which all requests inside the tunnel must go to.</summary>
-/// <param name="target">Where the tunnel goes.</param>
-/// <param name="userName">Who it is for, or null for an anonymous client.</param>
+/// <summary>
+/// Records the destination of a CONNECT tunnel, required as context to forward
+/// HTTP requests inside the tunnel.
+/// </summary>
+/// <remarks>
+/// <para>
+/// An instance of this class is added as a connection feature (<see cref="ConnectionContext.Features" />)
+/// when a CONNECT tunnel is established.  Then, <see cref="ForwardProxy.ProxyRequestAsync" />
+/// can recover the needed context to forward individual HTTP requests within that tunnel.
+/// </para>
+/// </remarks> 
+/// <param name="target">Where the tunnel connects to.</param>
+/// <param name="userName">The proxy's user, or null for the anonymous user. </param>
 internal sealed class Tunnel(Authority target, string? userName)
 {
+    /// <summary>
+    /// Which HTTPS server to connect to for all requests in the CONNECT tunnel.
+    /// </summary>
     public Authority Target { get; } = target;
 
     /// <summary>
-    /// The user, as identified by the CONNECT request.  Nothing inside the tunnel can change
-    /// this.  It is a name so that changes to the user apply to tunnels that are open.
+    /// The proxy's user, as identified by the CONNECT request, or null for an anonymous user.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The proxy's user cannot be overridden from HTTP request headers within the tunnel.
+    /// </para>
+    /// <para>
+    /// The user is represented by the string name instead of an object, so that changes
+    /// to the user's settings apply to tunnels that are currently open.
+    /// </para>
+    /// </remarks>
     public string? UserName { get; } = userName;
 
     public int RequestCount;
@@ -102,7 +124,9 @@ internal static class ProxyListener
         {
             OnConnection = context =>
             {
-                var tunnel = GetTunnel(context.Connection.Features)!;
+                var tunnel = context.Connection.Features.Get<Tunnel>();
+                Debug.Assert(tunnel is not null, 
+                    "A Tunnel should have been set up as a ConnectionContext feature after a CONNECT request");
 
                 // The certificate is for the CONNECT target and not for whatever the client
                 // says in SNI, so that the name verified is the one being connected to.
@@ -178,14 +202,6 @@ internal static class ProxyListener
 
         var text = address.ToString();
         return names.Contains(text) ? names : [.. names, text];
-    }
-
-    /// <summary>Gets the tunnel that a connection is for, if any.</summary>
-    public static Tunnel? GetTunnel(IFeatureCollection features)
-    {
-        object? tunnel = null;
-        features.Get<IConnectionItemsFeature>()?.Items.TryGetValue(typeof(Tunnel), out tunnel);
-        return (Tunnel?)tunnel;
     }
 
     /// <summary>Gets how the listener of a connection identifies clients.</summary>
@@ -321,13 +337,14 @@ internal static class ProxyListener
         }
 
         var tunnel = new Tunnel(authority, userName);
-        connection.Items[typeof(Tunnel)] = tunnel;
+        connection.Features.Set<Tunnel>(tunnel);
+
         await connection.Transport.Output.WriteAsync(Established);
 
         await httpsPipeline(connection);
 
-        // Otherwise a client failing to get through, say because it pins
-        // certificates or is not speaking HTTP, would not show up anywhere.
+        // Log a message if the client requested nothing (valid) over the tunnel, 
+        // e.g. because it failed TLS certificate validation, or is not speaking HTTP.
         if (tunnel.RequestCount == 0)
         {
             log.Add(ListenAddresses.NameOfClient(connection.RemoteEndPoint), "CONNECT",
