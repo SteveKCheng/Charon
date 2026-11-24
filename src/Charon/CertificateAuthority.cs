@@ -16,6 +16,9 @@ internal sealed class CertificateAuthority
     /// <summary>How long before its expiry that a certificate gets replaced.</summary>
     private static readonly TimeSpan RenewalMargin = TimeSpan.FromDays(1);
 
+    /// <summary>How long before its expiry that the CA is warned about, as replacing it takes manual work.</summary>
+    private static readonly TimeSpan ExpiryWarningPeriod = TimeSpan.FromDays(30);
+
     private sealed record Leaf(SslStreamCertificateContext Context, DateTimeOffset NotAfter);
 
     private readonly X509Certificate2 _ca;
@@ -80,6 +83,28 @@ internal sealed class CertificateAuthority
         }
 
         File.WriteAllText(certificateFile, certificate.ExportCertificatePem());
+    }
+
+    /// <summary>Logs a warning if the CA has expired, or is going to soon.</summary>
+    /// <remarks>
+    /// This is not an error, as requests for <c>http://</c> URLs, and the Web UI, still work.
+    /// </remarks>
+    /// <param name="certificateFile">Where the CA's certificate is, to say in the warning.</param>
+    public void WarnOfExpiry(ILogger logger, string certificateFile)
+    {
+        DateTimeOffset notAfter = _ca.NotAfter;
+        var remaining = notAfter - _time.GetUtcNow();
+
+        if (remaining <= TimeSpan.Zero)
+        {
+            logger.LogWarning("The CA certificate {File} expired at {NotAfter:u}, so clients will refuse to use TLS " +
+                              "until it is replaced", certificateFile, notAfter);
+        }
+        else if (remaining < ExpiryWarningPeriod)
+        {
+            logger.LogWarning("The CA certificate {File} expires at {NotAfter:u}, after which clients will refuse to use TLS " +
+                              "until it is replaced", certificateFile, notAfter);
+        }
     }
 
     /// <summary>Gets a certificate for a host name or IP address.</summary>

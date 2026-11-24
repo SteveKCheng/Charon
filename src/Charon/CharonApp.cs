@@ -149,6 +149,9 @@ public static class CharonApp
         var app = builder.Build();
         app.Lifetime.ApplicationStopping.Register(log.Complete);
 
+        ca.WarnOfExpiry(app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<CertificateAuthority>(),
+                        options.CaCertificateFile);
+
         // There is only one chain for the ASP.NET Core HTTP middleware that applies to all ports.
         // Connections for the proxy are distinguished from non-proxy connections (the Web UI), 
         // by the presence of a ForwardProxy instance as a connection feature.  In turn, this

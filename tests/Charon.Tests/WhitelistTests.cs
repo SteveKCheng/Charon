@@ -241,4 +241,27 @@ public sealed class CertificateAuthorityTests
         time.Now = start.AddDays(60);
         Assert.Same(second, ca.GetCertificate("example.com"));
     }
+
+    [Theory]
+    [InlineData(31, null)]
+    [InlineData(29, "expires at")]
+    [InlineData(-1, "expired at")]
+    public void ExpiryOfTheCAIsWarnedAbout(int daysLeft, string? expected)
+    {
+        var time = new ManualTime();
+        using var root = MakeRoot(time.Now.AddDays(daysLeft));
+        var logger = new ListLogger();
+
+        new CertificateAuthority(root, time).WarnOfExpiry(logger, "/path/to/ca.crt");
+
+        if (expected is null)
+        {
+            Assert.Empty(logger.Entries);
+            return;
+        }
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains(expected, warning);
+        Assert.Contains("/path/to/ca.crt", warning);
+    }
 }

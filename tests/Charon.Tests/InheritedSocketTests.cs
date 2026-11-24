@@ -19,21 +19,6 @@ public sealed class InheritedSocketTests : IDisposable
 
     public void Dispose() => Directory.Delete(_directory, recursive: true);
 
-    private sealed class ListLogger : ILogger
-    {
-        public List<(LogLevel Level, string Message)> Entries { get; } = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-                                Func<TState, Exception?, string> formatter) =>
-            Entries.Add((logLevel, formatter(state, exception)));
-
-        public IEnumerable<string> Warnings => Entries.Where(e => e.Level == LogLevel.Warning).Select(e => e.Message);
-    }
-
     private static Socket Listening(EndPoint endPoint)
     {
         var socket = new Socket(endPoint.AddressFamily, SocketType.Stream,
