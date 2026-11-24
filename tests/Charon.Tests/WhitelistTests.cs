@@ -188,4 +188,57 @@ public sealed class CertificateAuthorityTests
         Assert.True(chain.Build(leaf), string.Join("; ", chain.ChainStatus.Select(s => s.StatusInformation)));
         Assert.True(leaf.MatchesHostname(host));
     }
+
+    private static X509Certificate2 MakeRoot(DateTimeOffset notAfter)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=Charon Proxy CA", key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));
+        return request.CreateSelfSigned(notAfter.AddYears(-1), notAfter);
+    }
+
+    /// <summary>Certificates cannot outlast the CA, so renewing them does not help when it is about to expire.</summary>
+    [Theory]
+    [InlineData(12)]
+    [InlineData(-12)]
+    [InlineData(-240)]
+    public void CertificatesEndWithTheCA(int hoursLeft)
+    {
+        using var root = MakeRoot(DateTimeOffset.UtcNow.AddHours(hoursLeft));
+        var ca = new CertificateAuthority(root);
+
+        var context = ca.GetCertificate("example.com");
+        Assert.Equal(root.NotAfter, context.TargetCertificate.NotAfter);
+        Assert.Same(context, ca.GetCertificate("example.com"));
+    }
+
+    private sealed class ManualTime : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    [Fact]
+    public void CertificatesAreRenewedBeforeTheyExpire()
+    {
+        var time = new ManualTime();
+        var start = time.Now;
+        using var root = MakeRoot(start.AddDays(50));
+        var ca = new CertificateAuthority(root, time);
+
+        var first = ca.GetCertificate("example.com");
+        time.Now = start.AddDays(28);
+        Assert.Same(first, ca.GetCertificate("example.com"));
+
+        time.Now = start.AddDays(29.5);
+        var second = ca.GetCertificate("example.com");
+        Assert.True(second.TargetCertificate.NotAfter > first.TargetCertificate.NotAfter);
+
+        // The second already lasts for as long as the CA does.
+        Assert.Equal(root.NotAfter, second.TargetCertificate.NotAfter);
+        time.Now = start.AddDays(49.5);
+        Assert.Same(second, ca.GetCertificate("example.com"));
+        time.Now = start.AddDays(60);
+        Assert.Same(second, ca.GetCertificate("example.com"));
+    }
 }

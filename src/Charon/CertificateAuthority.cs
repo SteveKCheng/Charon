@@ -13,10 +13,14 @@ internal sealed class CertificateAuthority
 
     private static readonly TimeSpan LeafLifetime = TimeSpan.FromDays(30);
 
+    /// <summary>How long before its expiry that a certificate gets replaced.</summary>
+    private static readonly TimeSpan RenewalMargin = TimeSpan.FromDays(1);
+
     private sealed record Leaf(SslStreamCertificateContext Context, DateTimeOffset NotAfter);
 
     private readonly X509Certificate2 _ca;
     private readonly X509SignatureGenerator _signer;
+    private readonly TimeProvider _time;
 
     /// <summary>
     /// All leaf certificates share one key, as in mitmproxy: generating a key per host
@@ -28,9 +32,12 @@ internal sealed class CertificateAuthority
 
     public X509Certificate2 Certificate => _ca;
 
-    public CertificateAuthority(X509Certificate2 ca)
+    /// <param name="ca">The certificate of the CA, with its private key.</param>
+    /// <param name="time">Tells the time, which tests can change.</param>
+    public CertificateAuthority(X509Certificate2 ca, TimeProvider? time = null)
     {
         _ca = ca;
+        _time = time ?? TimeProvider.System;
         _signer = ca.GetECDsaPrivateKey() is { } ecdsa
             ? X509SignatureGenerator.CreateForECDsa(ecdsa)
             : X509SignatureGenerator.CreateForRSA(
@@ -86,9 +93,13 @@ internal sealed class CertificateAuthority
     {
         var lazy = _leaves.GetOrAdd(key, static (_, args) => new Lazy<Leaf>(() => args.Self.Issue(args.Hosts)),
                                     (Self: this, Hosts: hosts));
-        if (lazy.Value.NotAfter - DateTimeOffset.UtcNow < TimeSpan.FromDays(1))
+
+        // Certificates cannot outlast the CA.  One that ends with the CA is kept, even when
+        // expired, as a new one would be no better: it would be due for renewal again at once.
+        if (lazy.Value.NotAfter - _time.GetUtcNow() < RenewalMargin && lazy.Value.NotAfter < _ca.NotAfter)
         {
-            _leaves.TryRemove(key, out _);
+            // Only if it is still this one, and not one that another thread has renewed already.
+            _leaves.TryRemove(KeyValuePair.Create(key, lazy));
             return GetCertificate(key, hosts);
         }
 
@@ -124,13 +135,17 @@ internal sealed class CertificateAuthority
             request.CertificateExtensions.Add(
                 X509AuthorityKeyIdentifierExtension.CreateFromCertificate(_ca, true, false));
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         var notAfter = now + LeafLifetime;
         if (notAfter > _ca.NotAfter)
             notAfter = _ca.NotAfter;
 
+        // If the CA has expired, still issue a certificate, though it has expired as well:
+        // clients can then say what is wrong, when they would otherwise just get disconnected.
+        var notBefore = (now < notAfter ? now : notAfter).AddDays(-1);
+
         var issued = request.Create(
-            _ca.SubjectName, _signer, now.AddDays(-1), notAfter, RandomNumberGenerator.GetBytes(16));
+            _ca.SubjectName, _signer, notBefore, notAfter, RandomNumberGenerator.GetBytes(16));
 
         // offline: without it, .NET would try to fetch OCSP responses from the network.
         var context = SslStreamCertificateContext.Create(
