@@ -56,7 +56,10 @@ public static class CharonApp
                 listen.Use(idleExit.Track);
                 if (isTls)
                     ProxyListener.UseTlsToProxy(listen, ca, certificateNames);
-                ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
+
+                ProxyListener.Configure(listen, ca, log,
+                    kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>(),
+                    kestrel.ApplicationServices.GetRequiredService<ForwardProxy>());
             }
 
             var inherited = kestrel.ApplicationServices.GetRequiredService<InheritedSockets>();
@@ -136,13 +139,18 @@ public static class CharonApp
 
         var app = builder.Build();
         app.Lifetime.ApplicationStopping.Register(log.Complete);
-        var proxy = app.Services.GetRequiredService<ForwardProxy>();
 
-        // Which listener accepted the connection decides who it talks to.  Host-based routing
-        // would be no good: clients of the proxy can write anything in the Host header.
-        app.Use((context, next) =>
-            context.Features.Get<IConnectionItemsFeature>()?.Items.ContainsKey(typeof(ProxyListener)) == true
-                ? proxy.ProxyRequestAsync(context)
+        // There is only one chain for the ASP.NET Core HTTP middleware that applies to all ports.
+        // Connections for the proxy are distinguished from non-proxy connections (the Web UI), 
+        // by the presence of a ForwardProxy instance as a connection feature.  In turn, this
+        // feature is set up by ProxyListener.HandleConnectionAsync when it receives a connection
+        // for proxying HTTP requests.
+        //
+        // We cannot distinguish proxy vs non-proxy connections by host-based routing,
+        // since clients of the proxy can write anything in the Host header.
+        app.Use(static (context, next) =>
+            context.Features.Get<ForwardProxy>() is {} proxy
+                ? proxy.ProxyRequestAsync(context) 
                 : next(context));
 
         app.MapGet("/", async context =>

@@ -108,7 +108,8 @@ internal static class ProxyListener
     /// </para>
     /// </remarks>
     public static void Configure(ListenOptions listenOptions, CertificateAuthority ca, TrafficLog log,
-                                 IClientAuthenticator authenticator)
+                                 IClientAuthenticator authenticator,
+                                 ForwardProxy forwardProxy)
     {
         ConnectionDelegate? httpPipeline = null;
 
@@ -116,7 +117,7 @@ internal static class ProxyListener
         // If a CONNECT request is seen, our proxy defers to (invokes) httpsPipeline;
         // all other requests go to httpPipeline.
         listenOptions.Use(httpsPipeline => connection =>
-            HandleConnectionAsync(connection, httpsPipeline, httpPipeline!, log, authenticator));
+            HandleConnectionAsync(connection, httpsPipeline, httpPipeline!, log, authenticator, forwardProxy));
 
         // Middleware ②: sets up the HTTPS handler from Kestrel, which appears as 
         // httpsPipeline in middleware ①.
@@ -245,7 +246,7 @@ internal static class ProxyListener
     }
 
     /// <summary>
-    /// Delegates handling of a connection to HTTP or HTTPS,
+    /// Delegates handling of a proxy connection to HTTP or HTTPS,
     /// depending on the presence of a <c>CONNECT</c> request.
     /// </summary>
     /// <param name="connection">The current connection to handle. </param>
@@ -253,15 +254,24 @@ internal static class ProxyListener
     /// <param name="httpPipeline">HTTP handler (from Kestrel). </param>
     /// <param name="log">For logging unauthorized <c>CONNECT</c> requests. </param>
     /// <param name="authenticator">Used to check for unauthorized requests
-    /// for the current connection. </param>
+    /// for the current connection, unless <paramref name="connection" />
+    /// already has another authenticator set as a connection feature.
+    /// This instance will also become a connection feature in that case.
+    /// </param>
+    /// <param name="forwardProxy">Does the actual proxying of requests from the clients,
+    /// other than setting up the <c>CONNECT</c> tunnel.   This instance is set
+    /// as a connection feature on <paramref name="connection" />, so proxy connections
+    /// can be readily distinguished from non-proxy connections (e.g. for the Web UI),
+    /// and access <see cref="ForwardProxy" /> as a service. 
+    /// </param> 
     private static async Task HandleConnectionAsync(ConnectionContext connection,
                                                     ConnectionDelegate httpsPipeline,
                                                     ConnectionDelegate httpPipeline,
                                                     TrafficLog log,
-                                                    IClientAuthenticator authenticator)
+                                                    IClientAuthenticator authenticator,
+                                                    ForwardProxy forwardProxy)
     {
-        // Set on all connections, as this is how requests get told apart from the Web UI's.
-        connection.Items[typeof(ProxyListener)] = true;
+        connection.Features.Set<ForwardProxy>(forwardProxy);
 
         // A connection may already have a connection-specific IClientAuthenticator like
         // FixedUserAuthenticator.  If it does not, then set it to use the "default" one
