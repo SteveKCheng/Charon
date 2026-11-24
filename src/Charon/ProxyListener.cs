@@ -204,10 +204,6 @@ internal static class ProxyListener
         return names.Contains(text) ? names : [.. names, text];
     }
 
-    /// <summary>Gets how the listener of a connection identifies clients.</summary>
-    public static IClientAuthenticator GetAuthenticator(IFeatureCollection features) =>
-        (IClientAuthenticator)features.Get<IConnectionItemsFeature>()!.Items[typeof(IClientAuthenticator)]!;
-
     /// <summary>
     /// Gets the field value corresponding to a field name in a HTTP request header. 
     /// </summary>
@@ -267,11 +263,13 @@ internal static class ProxyListener
         // Set on all connections, as this is how requests get told apart from the Web UI's.
         connection.Items[typeof(ProxyListener)] = true;
 
-        // A connection can bring its own, if the transport already knows who it is from.
-        if (connection.Items.TryGetValue(typeof(IClientAuthenticator), out var own))
-            authenticator = (IClientAuthenticator)own!;
+        // A connection may already have a connection-specific IClientAuthenticator like
+        // FixedUserAuthenticator.  If it does not, then set it to use the "default" one
+        // passed into this method.
+        if (connection.Features.Get<IClientAuthenticator>() is {} connectionAuthenticator)
+            authenticator = connectionAuthenticator;
         else
-            connection.Items[typeof(IClientAuthenticator)] = authenticator;
+            connection.Features.Set<IClientAuthenticator>(authenticator);
 
         string? head;
         try

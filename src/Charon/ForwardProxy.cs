@@ -98,7 +98,8 @@ internal sealed class ForwardProxy
         // authentication must happen per HTTP request. 
         var userName = tunnel?.UserName;
         var isAuthenticated = tunnel is not null ||
-            ProxyListener.GetAuthenticator(context.Features).TryAuthenticate(request.Headers.ProxyAuthorization, out userName);
+            (context.Features.Get<IClientAuthenticator>()
+                ?.TryAuthenticate(request.Headers.ProxyAuthorization, out userName) ?? false);
 
         ProxyUser? user = null;
         if (!isAuthenticated || (userName is not null && (user = _users.Find(userName)) is null))

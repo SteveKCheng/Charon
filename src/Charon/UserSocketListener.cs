@@ -249,7 +249,7 @@ internal sealed class UserSocketListener : IConnectionListener
                 }
 
                 var connection = _connectionFactory.Create(client);
-                connection.Items[typeof(IClientAuthenticator)] = new FixedUserAuthenticator(name);
+                connection.Features.Set<IClientAuthenticator>(new FixedUserAuthenticator(name));
 
                 try
                 {

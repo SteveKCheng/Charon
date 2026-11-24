@@ -2,13 +2,22 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Connections;
 
 namespace Charon;
 
-/// <summary>Decides who a client of the proxy is.</summary>
+/// <summary>
+/// Determines which proxy user a connection or request is associated with, possibly given credentials.
+/// </summary>
 /// <remarks>
-/// A listener has one of these, so that listeners can go about this differently.  For a Unix
-/// domain socket dedicated to one user, the socket itself says who the client is.
+/// <para>
+/// An implementation of this interface is set as a connection feature (<see cref="ConnectionContext.Features" />)
+/// for the connection handlers to consult.
+/// </para>
+/// <para>
+/// Each listener in Charon can set up different implementations/instances, e.g. a
+/// particular Unix domain socket may be dedicated to one user only.
+/// </para>
 /// </remarks>
 internal interface IClientAuthenticator
 {
