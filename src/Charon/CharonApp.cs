@@ -3,9 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Connections;
-using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Yarp.ReverseProxy.Forwarder;
 
 namespace Charon;
 
@@ -46,20 +44,30 @@ public static class CharonApp
             kestrel.Limits.MaxRequestLineSize = 64 * 1024;
             kestrel.Limits.Http2.MaxRequestHeaderFieldSize = 64 * 1024;
 
+            // Common services for each invocation of ConfigureProxy
             var idleExit = kestrel.ApplicationServices.GetRequiredService<IdleExit>();
+            var defaultAuthenticator = kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>();
+            var forwardProxy = kestrel.ApplicationServices.GetRequiredService<ForwardProxy>(); 
 
             void ConfigureProxy(ListenOptions listen, bool isTls)
             {
+                // This setting, which is the default in Kestrel, lets HTTP/1.x and HTTP/2 be
+                // accepted in all of Kestrel's connection middleware.
+                //
+                // Now, Charon's outer proxy connection only accepts HTTP/1.x, since we parse CONNECT requests
+                // manually.  To ensure that clients don't try to use HTTP/2 (for the outer connection),
+                // ProxyListener.UseTlsToProxy below only offers HTTP/1.x in the TLS negotiation.  In the
+                // case of cleartext HTTP/2, Kestrel does not accept that in the first place
+                // unless HttpProtocols.Http2 is specified.
                 listen.Protocols = HttpProtocols.Http1AndHttp2;
 
-                // First, so that it counts tunnels as well, for as long as they are open.
+                // Idle-server timeout for proxy connections
                 listen.Use(idleExit.Track);
+
                 if (isTls)
                     ProxyListener.UseTlsToProxy(listen, ca, certificateNames);
 
-                ProxyListener.Configure(listen, ca, log,
-                    kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>(),
-                    kestrel.ApplicationServices.GetRequiredService<ForwardProxy>());
+                ProxyListener.Configure(listen, ca, log, defaultAuthenticator, forwardProxy);
             }
 
             var inherited = kestrel.ApplicationServices.GetRequiredService<InheritedSockets>();
@@ -94,6 +102,7 @@ public static class CharonApp
 
             void ConfigureUi(ListenOptions listen)
             {
+                // Idle-server timeout for Web UI, if enabled
                 if (options.IdleTimeoutCountsWebUI)
                     listen.Use(idleExit.Track);
             }
@@ -149,8 +158,8 @@ public static class CharonApp
         // We cannot distinguish proxy vs non-proxy connections by host-based routing,
         // since clients of the proxy can write anything in the Host header.
         app.Use(static (context, next) =>
-            context.Features.Get<ForwardProxy>() is {} proxy
-                ? proxy.ProxyRequestAsync(context) 
+            context.Features.Get<ForwardProxy>() is {} forwardProxy
+                ? forwardProxy.ProxyRequestAsync(context) 
                 : next(context));
 
         app.MapGet("/", async context =>
