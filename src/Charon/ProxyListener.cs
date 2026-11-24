@@ -1,10 +1,12 @@
 using System.Buffers;
+using System.Net;
 using System.Net.Security;
 using System.Text;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 namespace Charon;
@@ -116,6 +118,66 @@ internal static class ProxyListener
         // expected to be the regular HTTP handler from Kestrel, to pass into 
         // middleware ①, as httpPipeline.
         listenOptions.Use(next => httpPipeline = next);
+    }
+
+    /// <summary>
+    /// Has clients use TLS to connect to the proxy itself.  This must come before
+    /// <see cref="Configure" />.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This protects what the client sends to the proxy outside of tunnels, above all its
+    /// password.  The TLS of a tunnel is then nested inside this one.
+    /// </para>
+    /// <para>
+    /// There is one certificate for all the names the proxy has been given, plus the IP address
+    /// the client connected to.  So what the client says in SNI does not matter, which it
+    /// leaves out anyway when connecting to an IP address.
+    /// </para>
+    /// </remarks>
+    public static void UseTlsToProxy(ListenOptions listenOptions, CertificateAuthority ca, string[] names)
+    {
+        listenOptions.UseHttps(new TlsHandshakeCallbackOptions
+        {
+            OnConnection = context => ValueTask.FromResult(new SslServerAuthenticationOptions
+            {
+                ServerCertificateContext = ca.GetCertificate(AddLocalAddress(names, context.Connection.LocalEndPoint)),
+
+                // Not HTTP/2, as CONNECT is only understood in HTTP/1.x here.
+                // Inside of a tunnel, HTTP/2 is negotiated separately.
+                ApplicationProtocols = [SslApplicationProtocol.Http11],
+            }),
+        });
+
+        // Make the decrypted connection look like any other to what comes next.  In particular,
+        // Kestrel's TLS for tunnels does nothing on a connection that has ITlsConnectionFeature.
+        // And what is outside of a tunnel are requests for http:// URLs, so they should not
+        // appear to have come by HTTPS.
+        listenOptions.Use(next => connection =>
+        {
+            connection.Features.Set<ITlsConnectionFeature>(null);
+            connection.Features.Set<ITlsHandshakeFeature>(null);
+            connection.Features.Set<ITlsApplicationProtocolFeature>(null);
+            connection.Features.Set<ISslStreamFeature>(null);
+            return next(connection);
+        });
+    }
+
+    private static string[] AddLocalAddress(string[] names, EndPoint? localEndPoint)
+    {
+        if (localEndPoint is not IPEndPoint { Address: var address })
+            return names;
+
+        // IPv4 clients of a listener on [::] appear like this, but verify the plain address.
+        if (address.IsIPv4MappedToIPv6)
+            address = address.MapToIPv4();
+
+        // Certificates have no scopes, which link-local addresses have.
+        else if (address.IsIPv6LinkLocal)
+            address = new IPAddress(address.GetAddressBytes());
+
+        var text = address.ToString();
+        return names.Contains(text) ? names : [.. names, text];
     }
 
     /// <summary>Gets the tunnel that a connection is for, if any.</summary>

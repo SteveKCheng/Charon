@@ -76,13 +76,20 @@ internal sealed class CertificateAuthority
     }
 
     /// <summary>Gets a certificate for a host name or IP address.</summary>
-    public SslStreamCertificateContext GetCertificate(string host)
+    public SslStreamCertificateContext GetCertificate(string host) => GetCertificate(host, [host]);
+
+    /// <summary>Gets one certificate that is for all of the given host names and IP addresses.</summary>
+    public SslStreamCertificateContext GetCertificate(string[] hosts) =>
+        GetCertificate(string.Join(',', hosts), hosts);   // Commas are not valid in any host.
+
+    private SslStreamCertificateContext GetCertificate(string key, string[] hosts)
     {
-        var lazy = _leaves.GetOrAdd(host, static (h, self) => new Lazy<Leaf>(() => self.Issue(h)), this);
+        var lazy = _leaves.GetOrAdd(key, static (_, args) => new Lazy<Leaf>(() => args.Self.Issue(args.Hosts)),
+                                    (Self: this, Hosts: hosts));
         if (lazy.Value.NotAfter - DateTimeOffset.UtcNow < TimeSpan.FromDays(1))
         {
-            _leaves.TryRemove(host, out _);
-            return GetCertificate(host);
+            _leaves.TryRemove(key, out _);
+            return GetCertificate(key, hosts);
         }
 
         // Hosts are chosen by the client, which must not be able to exhaust memory.
@@ -92,13 +99,16 @@ internal sealed class CertificateAuthority
         return lazy.Value.Context;
     }
 
-    private Leaf Issue(string host)
+    private Leaf Issue(string[] hosts)
     {
         var names = new SubjectAlternativeNameBuilder();
-        if (IPAddress.TryParse(host, out var address))
-            names.AddIpAddress(address);
-        else
-            names.AddDnsName(host);
+        foreach (var host in hosts)
+        {
+            if (IPAddress.TryParse(host, out var address))
+                names.AddIpAddress(address);
+            else
+                names.AddDnsName(host);
+        }
 
         // Clients go by the subject alternative name, which unlike the
         // common name has no length limit that a long host name could exceed.

@@ -39,6 +39,8 @@ cannot go unnoticed.
 }
 ```
 
+For the proxy, an IP address and port may have `https://` in front: see [TLS to the proxy](#tls-to-the-proxy).
+
 Hostnames such as `localhost` are not accepted, so that what gets listened on is never in doubt.
 An empty list means not listening at all, which suits a proxy used only through the sockets of
 its users.  As environment variables, the elements are numbered: `Charon__ProxyListen__0`.
@@ -48,6 +50,30 @@ For sockets that each belong to one user, see [Unix domain sockets](#unix-domain
 The directory of the socket is created if need be.  A socket left behind by a Charon that
 crashed is replaced, but Charon does not start if something else is at the path, or if
 any address cannot be listened on.
+
+### TLS to the proxy
+
+Passwords of users, and requests for `http://` URLs, are otherwise sent to the proxy unencrypted.
+If it listens on a network, have it use TLS:
+
+```json
+{
+  "Charon": {
+    "ProxyListen": [ "127.0.0.1:8080", "https://192.168.122.1:8443" ],
+    "ProxyCertificateNames": [ "localhost", "charon.example.com" ]
+  }
+}
+```
+
+Each port is either with TLS or without, and never both.  Clients are then given the URL with
+`https`, as in `HTTPS_PROXY=https://charon.example.com:8443`.  They use HTTP/1.1 with the proxy,
+but HTTP/2 still works for the `https://` URLs requested through it.  Not all clients support this:
+those that do include curl, git, Python's requests and Node.js, but not Python's own `urllib.request`.
+
+The certificate is issued by Charon's CA, for `ProxyCertificateNames` (by default, only
+`localhost`) and the IP address that the client connected to.  Names must include whatever
+clients use, such as an external address in front of a NAT.  Some clients configure the
+trust of proxies separately: `--proxy-cacert` for curl, and `GIT_PROXY_SSL_CAINFO` for git.
 
 To carry on with the CA of an existing mitmproxy installation, so that sandboxes need no changes:
 

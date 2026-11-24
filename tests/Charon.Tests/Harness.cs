@@ -22,6 +22,10 @@ public sealed class Harness : IAsyncLifetime
 
     public string Directory { get; } = System.IO.Directory.CreateTempSubdirectory("charon-test").FullName;
     public int ProxyPort { get; } = FreePort();
+
+    /// <summary>Port of the proxy for clients that use TLS to connect to it.</summary>
+    public int ProxyTlsPort { get; } = FreePort();
+
     public int UiPort { get; } = FreePort();
     public int HttpPort { get; } = FreePort();
     public int HttpsPort { get; } = FreePort();
@@ -176,7 +180,9 @@ public sealed class Harness : IAsyncLifetime
         var names = SystemdSockets.Select(s => s.Name).ToArray();
         _charon = CharonApp.Build(builder, new CharonOptions
         {
-            ProxyListen = [$"127.0.0.1:{ProxyPort}", $"[::1]:{ProxyPort}", ProxySocketPath],
+            ProxyListen = [$"127.0.0.1:{ProxyPort}", $"[::1]:{ProxyPort}", ProxySocketPath,
+                           $"https://127.0.0.1:{ProxyTlsPort}", $"https://[::1]:{ProxyTlsPort}"],
+            ProxyCertificateNames = ["localhost", "proxy.test"],
             UiListen = [$"127.0.0.1:{UiPort}", UiSocketPath],
             WhitelistFile = WhitelistFile,
             CaCertificateFile = CaFile,
@@ -417,9 +423,9 @@ public sealed class Harness : IAsyncLifetime
             return UpstreamRequests.Contains(path);
     }
 
-    private SocketsHttpHandler MakeHandler(ICredentials? proxyCredentials = null) => new()
+    private SocketsHttpHandler MakeHandler(ICredentials? proxyCredentials = null, string? proxyUrl = null) => new()
     {
-        Proxy = new WebProxy($"http://127.0.0.1:{ProxyPort}") { Credentials = proxyCredentials },
+        Proxy = new WebProxy(proxyUrl ?? $"http://127.0.0.1:{ProxyPort}") { Credentials = proxyCredentials },
         UseProxy = true,
         SslOptions = { CertificateChainPolicy = TrustCharon() },
     };
@@ -436,7 +442,8 @@ public sealed class Harness : IAsyncLifetime
     }
 
     /// <summary>Client that verifies certificates against Charon's CA alone.</summary>
-    public HttpClient MakeClient(Version? version = null, ICredentials? proxyCredentials = null) => new(MakeHandler(proxyCredentials))
+    public HttpClient MakeClient(Version? version = null, ICredentials? proxyCredentials = null, string? proxyUrl = null) =>
+        new(MakeHandler(proxyCredentials, proxyUrl))
     {
         DefaultRequestVersion = version ?? HttpVersion.Version11,
         DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
@@ -518,6 +525,44 @@ public sealed class Harness : IAsyncLifetime
         var stream = client.GetStream();
         stream.ReadTimeout = 10_000;
         return stream;
+    }
+
+    /// <summary>Connects to the proxy over TLS, verifying its certificate.</summary>
+    /// <param name="name">What to verify, and to send in SNI unless it is an IP address.</param>
+    public async Task<SslStream> ConnectTlsAsync(string name, IPAddress? address = null, params string[] alpn)
+    {
+        var ip = address ?? IPAddress.Loopback;
+        var client = new TcpClient(ip.AddressFamily) { NoDelay = true };
+        await client.ConnectAsync(ip, ProxyTlsPort);
+        var tls = new SslStream(client.GetStream());
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = name,
+                CertificateChainPolicy = TrustCharon(),
+                ApplicationProtocols = alpn.Select(a => new SslApplicationProtocol(a)).ToList(),
+            }, timeout.Token);
+            return tls;
+        }
+        catch
+        {
+            await tls.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>Does TLS for a tunnel on a stream that CONNECT has succeeded on.</summary>
+    public async Task<SslStream> StartTunnelTlsAsync(Stream stream, string sni)
+    {
+        var tls = new SslStream(stream);
+        await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = sni,
+            CertificateChainPolicy = TrustCharon(),
+        });
+        return tls;
     }
 
     /// <summary>Issues CONNECT and does TLS, returning the stream inside the tunnel.</summary>

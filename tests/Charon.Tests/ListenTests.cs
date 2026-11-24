@@ -77,7 +77,7 @@ public sealed class ListenAddressTests
     public void DefaultsAreTheUsualPortsOnIPv4Loopback()
     {
         var (proxy, ui) = ListenAddresses.ParseSettings(Load());
-        Assert.Equal([new IPEndPoint(IPAddress.Loopback, 8080)], proxy);
+        Assert.Equal([new ProxyAddress(new IPEndPoint(IPAddress.Loopback, 8080), IsTls: false)], proxy);
         Assert.Equal([new IPEndPoint(IPAddress.Loopback, 8081)], ui);
     }
 
@@ -89,7 +89,7 @@ public sealed class ListenAddressTests
             ("Charon:ProxyListen:1", "/run/proxy.sock"),
             ("Charon:UiListen:0", "127.0.0.1:9001")));
 
-        Assert.Equal(["[::1]:9000", "/run/proxy.sock"], proxy.Select(e => e.ToString()));
+        Assert.Equal(["[::1]:9000", "/run/proxy.sock"], proxy.Select(a => a.EndPoint.ToString()));
         Assert.Equal(["127.0.0.1:9001"], ui.Select(e => e.ToString()));
     }
 
@@ -105,6 +105,7 @@ public sealed class ListenAddressTests
     [InlineData("127.0.0.1:9000", "127.0.0.1:9000")]
     [InlineData("[::1]:9000", "[0:0::1]:9000")]
     [InlineData("/run/proxy.sock", "/run/proxy.sock")]
+    [InlineData("https://127.0.0.1:9000", "127.0.0.1:9000")]
     public void SameAddressTwiceIsRefused(string first, string second)
     {
         Assert.Throws<InvalidOperationException>(() =>
@@ -112,6 +113,59 @@ public sealed class ListenAddressTests
         var e = Assert.Throws<InvalidOperationException>(() =>
             ListenAddresses.ParseSettings(new CharonOptions { ProxyListen = [first], UiListen = [second] }));
         Assert.Contains("UiListen", e.Message);
+    }
+
+    [Fact]
+    public void ProxyAddressMayHaveTls()
+    {
+        Assert.Equal(new ProxyAddress(new IPEndPoint(IPAddress.Any, 8443), IsTls: true),
+                     ListenAddresses.ParseProxy("https://0.0.0.0:8443"));
+        Assert.Equal(new ProxyAddress(new IPEndPoint(IPAddress.IPv6Loopback, 8443), IsTls: true),
+                     ListenAddresses.ParseProxy("https://[::1]:8443"));
+    }
+
+    [Theory]
+    [InlineData("https://")]
+    [InlineData("https://127.0.0.1")]
+    [InlineData("https://127.0.0.1:0")]
+    [InlineData("https://127.0.0.1:8443/")]
+    [InlineData("https://localhost:8443")]
+    [InlineData("https:///run/proxy.sock")]
+    [InlineData("https://https://127.0.0.1:8443")]
+    [InlineData("http://127.0.0.1:8080")]
+    [InlineData("HTTPS://127.0.0.1:8443")]
+    public void OtherFormsForTheProxyAreRefused(string text)
+    {
+        Assert.Throws<FormatException>(() => ListenAddresses.ParseProxy(text));
+    }
+
+    [Fact]
+    public void WebUIHasNoTls()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            ListenAddresses.ParseSettings(new CharonOptions { UiListen = ["https://127.0.0.1:8443"] }));
+    }
+
+    [Fact]
+    public void CertificateNamesAreMadeCanonical()
+    {
+        Assert.Equal(["localhost"], ListenAddresses.ParseCertificateNames(Load()));
+        Assert.Equal(["proxy.example.com", "10.0.0.1", "::1"], ListenAddresses.ParseCertificateNames(
+            new CharonOptions { ProxyCertificateNames = ["Proxy.Example.COM", "10.0.0.1", "0:0::1"] }));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("proxy.example.com:8443")]
+    [InlineData("https://proxy.example.com")]
+    [InlineData("a,b")]
+    [InlineData("10.1")]
+    [InlineData("[::1]")]
+    public void OtherCertificateNamesAreRefused(string name)
+    {
+        var e = Assert.Throws<InvalidOperationException>(() =>
+            ListenAddresses.ParseCertificateNames(new CharonOptions { ProxyCertificateNames = [name] }));
+        Assert.Contains("ProxyCertificateNames", e.Message);
     }
 
     [Fact]

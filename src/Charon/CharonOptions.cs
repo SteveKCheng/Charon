@@ -10,14 +10,23 @@ public sealed class CharonOptions
 
     public static readonly string[] DefaultUiListen = ["127.0.0.1:8081"];
 
+    public static readonly string[] DefaultProxyCertificateNames = ["localhost"];
+
     /// <summary>
-    /// Addresses that the proxy listens on: <see cref="ListenAddresses.Forms"/>.
+    /// Addresses that the proxy listens on: <see cref="ListenAddresses.ProxyForms"/>.
     /// Null means <see cref="DefaultProxyListen"/>, and empty means none.  The default is not
     /// assigned here, as binding configuration would add to it instead of replacing it.
     /// </summary>
     public string[]? ProxyListen { get; set; }
 
-    /// <summary>Addresses that the Web UI listens on, in the same way as <see cref="ProxyListen"/>.</summary>
+    /// <summary>
+    /// Host names and IP addresses that clients connect to this proxy by, for its certificate
+    /// on addresses that are <c>https://</c>.  The IP address that a client has connected to
+    /// is always included.  Null means <see cref="DefaultProxyCertificateNames"/>.
+    /// </summary>
+    public string[]? ProxyCertificateNames { get; set; }
+
+    /// <summary>Addresses that the Web UI listens on: <see cref="ListenAddresses.Forms"/>.</summary>
     public string[]? UiListen { get; set; }
 
     /// <summary>Same format as the whitelist of the mitmproxy-whitelist add-in.</summary>

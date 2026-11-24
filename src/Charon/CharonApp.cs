@@ -30,6 +30,7 @@ public static class CharonApp
         var ca = CertificateAuthority.LoadOrCreate(options.CaCertificateFile, options.CaKeyFile);
         var log = new TrafficLog(options.TrafficLogCapacity);
         var (proxyAddresses, uiAddresses) = ListenAddresses.ParseSettings(options);
+        var certificateNames = ListenAddresses.ParseCertificateNames(options);
         if (options.IdleTimeout <= TimeSpan.Zero)
             throw new InvalidOperationException("The setting IdleTimeout must be more than 0, or not set for never stopping.");
 
@@ -47,12 +48,14 @@ public static class CharonApp
 
             var idleExit = kestrel.ApplicationServices.GetRequiredService<IdleExit>();
 
-            void ConfigureProxy(ListenOptions listen)
+            void ConfigureProxy(ListenOptions listen, bool isTls)
             {
                 listen.Protocols = HttpProtocols.Http1AndHttp2;
 
                 // First, so that it counts tunnels as well, for as long as they are open.
                 listen.Use(idleExit.Track);
+                if (isTls)
+                    ProxyListener.UseTlsToProxy(listen, ca, certificateNames);
                 ProxyListener.Configure(listen, ca, log, kestrel.ApplicationServices.GetRequiredService<ProxyUserStore>());
             }
 
@@ -81,10 +84,10 @@ public static class CharonApp
                 }
             }
 
-            foreach (var endPoint in proxyAddresses)
-                Listen(endPoint, "proxy", ConfigureProxy);
+            foreach (var (endPoint, isTls) in proxyAddresses)
+                Listen(endPoint, isTls ? "proxy over TLS" : "proxy", listen => ConfigureProxy(listen, isTls));
 
-            kestrel.Listen(new UserSocketsEndPoint(), ConfigureProxy);
+            kestrel.Listen(new UserSocketsEndPoint(), listen => ConfigureProxy(listen, isTls: false));
 
             void ConfigureUi(ListenOptions listen)
             {
